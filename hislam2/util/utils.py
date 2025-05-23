@@ -4,7 +4,8 @@ import rich
 import copy
 import torch
 from matplotlib import cm
-
+from pathlib import Path
+from PIL import Image
 
 _log_styles = {
     "GSBackend": "bold green",
@@ -99,3 +100,64 @@ def clone_obj(obj):
         if isinstance(getattr(clone_obj, attr), torch.Tensor):
             setattr(clone_obj, attr, getattr(clone_obj, attr).detach().clone())
     return clone_obj
+
+def mask_feature_mean(feat_map, gt_masks):
+    """Compute the average instance features within each mask.
+    feat_map: [C=6, H, W]         the instance features of the entire image
+    gt_masks: [num_mask, mask_h, mask_w]  num_mask boolean masks
+    """
+    num_mask, mask_h, mask_w = gt_masks.shape
+    C, H, W = feat_map.shape
+
+    # Resize masks to match feature map size using nearest neighbor interpolation
+    if (mask_h, mask_w) != (H, W):
+        gt_masks = gt_masks.unsqueeze(1).float()  # [num_mask, 1, mask_h, mask_w]
+        gt_masks = torch.nn.functional.interpolate(gt_masks, size=(H, W), mode='nearest')
+        gt_masks = gt_masks.squeeze(1)  # [num_mask, H, W]
+
+    # expand feat and masks for batch processing
+    feat_expanded = feat_map.unsqueeze(0).expand(num_mask, *feat_map.shape)  # [num_mask, 6, H, W]
+    masks_expanded = gt_masks.unsqueeze(1).expand(-1, feat_map.shape[0], -1, -1)  # [num_mask, 6, H, W]
+    masked_feats = ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5)   # in chuck to avoid OOM
+    mask_counts = masks_expanded.sum(dim=(2, 3))  # [num_mask, 6]
+
+    # the number of pixels within each mask
+    mask_counts = mask_counts.clamp(min=1)
+
+    # the mean features of each mask
+    sum_per_channel = masked_feats.sum(dim=[2, 3])
+    mean_per_channel = sum_per_channel / mask_counts    # [num_mask, 6]
+
+    return mean_per_channel   # [num_mask, 6]
+
+def ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5):
+    result = torch.zeros_like(feat_expanded)
+    for i in range(0, feat_expanded.size(0), chunk_size):
+        end_i = min(i + chunk_size, feat_expanded.size(0))
+        for j in range(0, feat_expanded.size(1), chunk_size):
+            end_j = min(j + chunk_size, feat_expanded.size(1))
+            chunk_feat = feat_expanded[i:end_i, j:end_j]
+            chunk_mask = masks_expanded[i:end_i, j:end_j].float()
+
+            result[i:end_i, j:end_j] = chunk_feat * chunk_mask
+    return result
+
+def read_sam_masks(image_idx, mask_path):
+    """
+    Read the SAM masks from a .png file.
+    Args:
+        image_idx (int): the index of the image.
+        mask_path (str): path to the all masks directory.
+    Returns:
+        masks (torch.Tensor): the masks in shape of [num_masks, H, W].
+    """
+    mask_directory = Path(f"{mask_path}/{int(image_idx):05d}")
+    mask_files = mask_directory.glob("*.png")
+    masks = []
+    for mask_file in mask_files:
+        mask = np.array(Image.open(mask_file).convert("L"))
+        masks.append(mask)
+    masks = np.stack(masks, axis=0)  # [num_masks, H, W]
+    masks = torch.from_numpy(masks) # convert to torch tensor
+
+    return masks

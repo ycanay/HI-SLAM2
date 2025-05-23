@@ -108,3 +108,54 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+
+def separation_loss(feat_mean_stack):
+    """ inter-mask contrastive loss Eq.(2) in the paper
+    Constrain the instance features within different masks to be as far apart as possible.
+    """
+    N, _ = feat_mean_stack.shape
+
+    # expand feat_mean_stack[N, 6] to [N, N, 6]
+    feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
+    feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
+    
+    # distance
+    diff_squared = (feat_expanded - feat_transposed).pow(2).sum(2)
+    
+    # Calculate the inverse of the distance to enhance discrimination
+    epsilon = 1     # 1e-6
+    inverse_distance = 1.0 / (diff_squared + epsilon)
+    # Exclude diagonal elements (distance from itself) and calculate the mean inverse distance
+    mask = torch.eye(N, device=feat_mean_stack.device).bool()
+    inverse_distance.masked_fill_(mask, 0)  
+
+    # note: weight
+    # sorted by distance
+    sorted_indices = inverse_distance.argsort().argsort()
+    loss_weight = (sorted_indices.float() / (N - 1)) * (1.0 - 0.1) + 0.1    # scale to 0.1 - 1.0, [N, N]
+    # small weight
+    inverse_distance *= loss_weight     # [N, N]
+
+    # final loss
+    loss = inverse_distance.sum() / (N * (N - 1))
+
+    return loss
+
+def cohesion_loss(feat_mean_stack):
+    """ intra-mask contrastive loss Eq.(3) in the paper
+    Constrain the instance features within the same mask to be as close as possible.
+    """
+    N, _ = feat_mean_stack.shape
+
+    # expand feat_mean_stack[N, 6] to [N, N, 6]
+    feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
+    feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
+
+    # distance
+    diff_squared = (feat_expanded - feat_transposed).pow(2).sum(2)
+    # Exclude diagonal elements (distance from itself)
+    mask = torch.eye(N, device=feat_mean_stack.device).bool()
+    diff_squared.masked_fill_(mask, 0)
+    # final loss: mean of off-diagonal distances
+    loss = diff_squared.sum() / (N * (N - 1))
+    return loss

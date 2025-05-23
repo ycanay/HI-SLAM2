@@ -73,6 +73,34 @@ def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scalin
         theta = viewpoint_camera.cam_rot_delta,
         rho = viewpoint_camera.cam_trans_delta,
     )
+    shs = None
+    colors_precomp = pc.get_ins_feat
+
+    rendered_features, _, _, _ = rasterizer(
+        means3D = means3D,
+        means2D = means2D,
+        shs = shs,
+        colors_precomp = colors_precomp[:, :3],
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        cov3D_precomp = cov3D_precomp,
+        theta = viewpoint_camera.cam_rot_delta,
+        rho = viewpoint_camera.cam_trans_delta,
+    )
+    rendered_features2, _, _, _ = rasterizer(
+        means3D = means3D,
+        means2D = means2D,
+        shs = shs,
+        colors_precomp = colors_precomp[:, 3:],
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        cov3D_precomp = cov3D_precomp,
+        theta = viewpoint_camera.cam_rot_delta,
+        rho = viewpoint_camera.cam_trans_delta,
+    )
+    rendered_features = torch.cat((rendered_features, rendered_features2), dim=0)
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -81,4 +109,5 @@ def render(viewpoint_camera, pc : GaussianModel, bg_color : torch.Tensor, scalin
             "viewspace_points": means2D,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "n_touched": n_touched}
+            "n_touched": n_touched,
+            "rendered_features": rendered_features,}

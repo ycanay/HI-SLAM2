@@ -9,8 +9,8 @@ def to_se3_vec(pose_mat):
     return np.hstack((pose_mat[:3, 3], quat))
 
 
-nrs = ['0000', '0054', '0059', '0106', '0169', '0181', '0207', '0233']
-seqs = [s for s in sorted(glob("data/ScanNet/scene*")) if any(n in s for n in nrs)]
+nrs = ['0000']
+seqs = [s for s in sorted(glob("data/scannet/scene*")) if any(n in s for n in nrs)]
 
 for scan_path in seqs:
     print("preprocesing", os.path.basename(scan_path))

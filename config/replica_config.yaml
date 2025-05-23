@@ -54,3 +54,5 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
+masks:
+  mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks"

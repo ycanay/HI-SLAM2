@@ -1,3 +1,4 @@
+import os
 import random
 import time
 import numpy as np
@@ -7,9 +8,14 @@ from tqdm import trange
 from munch import munchify
 from lietorch import SE3, SO3
 
-from util.utils import Log, clone_obj
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
+from util.utils import Log, clone_obj, read_sam_masks, mask_feature_mean
 from gaussian.renderer import render
-from gaussian.utils.loss_utils import l1_loss, ssim
+from gaussian.utils.loss_utils import l1_loss, ssim, separation_loss, cohesion_loss
 from gaussian.scene.gaussian_model import GaussianModel
 from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
@@ -39,6 +45,11 @@ class GSBackEnd(mp.Process):
 
         self.cameras_extent = 6.0
         self.set_hyperparams()
+
+        if SummaryWriter:
+            self.writer = SummaryWriter(log_dir=os.path.join(save_dir, 'tensorboard'))
+        else:
+            self.writer = None
 
         if self.use_gui:
             self.q_main2vis = mp.Queue()
@@ -165,15 +176,23 @@ class GSBackEnd(mp.Process):
         for mapping_iteration in range(self.init_itr_num):
             self.iteration_count += 1
             render_pkg = render(viewpoint, self.gaussians, self.background)
-            (image, viewspace_point_tensor, visibility_filter, radii, depth, n_touched) = (
+            (image, viewspace_point_tensor, visibility_filter, radii, depth, n_touched, ins_feat) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
                 render_pkg["visibility_filter"],
                 render_pkg["radii"],
                 render_pkg["depth"],
-                render_pkg["n_touched"]
+                render_pkg["n_touched"],
+                render_pkg["rendered_features"],
             )
             loss_init = get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
+            sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
+            feature_mean = mask_feature_mean(ins_feat, sam_masks)
+            s_loss = separation_loss(feature_mean)
+            c_loss = cohesion_loss(feature_mean)
+            loss_init += s_loss + c_loss
+            if self.writer:
+                self.writer.add_scalar('Loss/init', loss_init.item(), self.iteration_count)
             loss_init.backward()
 
             with torch.no_grad():
@@ -224,16 +243,24 @@ class GSBackEnd(mp.Process):
             viewpoints = viewpoint_stack + [random_viewpoint_stack[idx] for idx in torch.randperm(len(random_viewpoint_stack))[:2]]
             for viewpoint in viewpoints:
                 render_pkg = render(viewpoint, self.gaussians, self.background)
-                image, viewspace_point_tensor, visibility_filter, radii, depth, n_touched = (
+                image, viewspace_point_tensor, visibility_filter, radii, depth, n_touched, ins_feat = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
                     render_pkg["visibility_filter"],
                     render_pkg["radii"],
                     render_pkg["depth"],
-                    render_pkg["n_touched"])
+                    render_pkg["n_touched"],
+                    render_pkg["rendered_features"],
+                    )
 
                 loss_mapping += self.lambda_dnormal * get_loss_normal(depth, viewpoint) / 10.
                 loss_mapping += get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
+                sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
+                feature_mean = mask_feature_mean(ins_feat, sam_masks)
+                s_loss = separation_loss(feature_mean)
+                c_loss = cohesion_loss(feature_mean)
+                loss_mapping += s_loss + c_loss
+
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
@@ -242,6 +269,9 @@ class GSBackEnd(mp.Process):
             isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
             loss_mapping += 10 * isotropic_loss.mean()
             loss_mapping.backward()
+            # Log loss to TensorBoard
+            if self.writer:
+                self.writer.add_scalar('Loss/map', loss_mapping.item(), self.iteration_count)
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 for idx in range(len(viewspace_point_tensor_acm)):
@@ -301,17 +331,24 @@ class GSBackEnd(mp.Process):
             viewpoint_cam_idx = viewpoint_idx_stack.pop(random.randint(0, len(viewpoint_idx_stack) - 1))
             viewpoint_cam = self.viewpoints[viewpoint_cam_idx]
             render_pkg = render(viewpoint_cam, self.gaussians, self.background)
-            image, depth = render_pkg["render"], render_pkg["depth"]
+            image, depth, ins_feat = render_pkg["render"], render_pkg["depth"], render_pkg["rendered_features"]
             image = (torch.exp(viewpoint_cam.exposure_a)) * image + viewpoint_cam.exposure_b
+            sam_masks = read_sam_masks(viewpoint_cam.tstamp, self.config["masks"]["mask_dir"]).cuda()
+            feature_mean = mask_feature_mean(ins_feat, sam_masks)
+            s_loss = separation_loss(feature_mean)
+            c_loss = cohesion_loss(feature_mean)
 
             gt_image = viewpoint_cam.original_image.cuda()
-            loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss(image, gt_image) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image))
+            loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss(image, gt_image) + self.opt_params.lambda_dssim * (1.0 - ssim(image, gt_image) + s_loss + c_loss)
             loss += get_loss_mapping_rgbd(self.config, image, depth, viewpoint_cam)
             if iteration < 7000:
                 loss += self.lambda_dnormal * get_loss_normal(depth, viewpoint_cam)
             else:
                 loss += self.lambda_dnormal * get_loss_normal(depth, viewpoint_cam) / 2
             loss.backward()
+            # Log color refinement loss to TensorBoard
+            if self.writer:
+                self.writer.add_scalar('Loss/color_refinement', loss.item(), iteration)
             with torch.no_grad():
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
@@ -327,3 +364,5 @@ class GSBackEnd(mp.Process):
             pbar.set_description(f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
 
         Log("Map refinement done")
+        if self.writer:
+            self.writer.close()
