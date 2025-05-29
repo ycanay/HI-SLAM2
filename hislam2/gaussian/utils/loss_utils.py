@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+from util.utils import ele_multip_in_chunks
 
 
 def mse(img1, img2):
@@ -141,21 +142,38 @@ def separation_loss(feat_mean_stack):
 
     return loss
 
-def cohesion_loss(feat_mean_stack):
-    """ intra-mask contrastive loss Eq.(3) in the paper
-    Constrain the instance features within the same mask to be as close as possible.
+def cohesion_loss(gt_masks, feat_map, feature_mean):
     """
-    N, _ = feat_mean_stack.shape
+    Computes cohesion loss using externally provided per-mask mean features.
+    
+    Args:
+        gt_masks (Tensor): [num_masks, H1, W1] boolean instance masks
+        feat_map (Tensor): [6, H, W] feature map with 6 channels
+        feature_mean (Tensor): [num_masks, 6] mean features for each mask
 
-    # expand feat_mean_stack[N, 6] to [N, N, 6]
-    feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
-    feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
+    Returns:
+        Tensor: cohesion loss
+    """
+    num_masks, mask_h, mask_w = gt_masks.shape
+    C, H, W = feat_map.shape
+    assert C == 6, "Feature map must have 6 channels."
 
-    # distance
-    diff_squared = (feat_expanded - feat_transposed).pow(2).sum(2)
-    # Exclude diagonal elements (distance from itself)
-    mask = torch.eye(N, device=feat_mean_stack.device).bool()
-    diff_squared.masked_fill_(mask, 0)
-    # final loss: mean of off-diagonal distances
-    loss = diff_squared.sum() / (N * (N - 1))
-    return loss
+    # Resize masks if needed
+    if (mask_h, mask_w) != (H, W):
+        gt_masks = torch.nn.functional.interpolate(gt_masks.unsqueeze(1).float(), size=(H, W), mode='nearest')
+        gt_masks = gt_masks.squeeze(1)  # [num_masks, H, W]
+
+    # Expand tensors
+    feat_exp = feat_map.unsqueeze(0).expand(num_masks, -1, -1, -1)       # [num_masks, 6, H, W]
+    mask_exp = gt_masks.unsqueeze(1).expand(-1, C, -1, -1)               # [num_masks, 6, H, W]
+
+    # Apply masks to features
+    masked_feats = ele_multip_in_chunks(feat_exp, mask_exp, 2)
+
+    # Expand mean feature per mask to spatial layout
+    mean_feats = feature_mean.unsqueeze(2).unsqueeze(3).expand(-1, -1, H, W)
+    mean_feats_masked = ele_multip_in_chunks(mean_feats, mask_exp, 2)
+
+    # MSE loss between masked features and masked means
+    mse_loss = ((masked_feats - mean_feats_masked) ** 2).sum() / num_masks
+    return mse_loss

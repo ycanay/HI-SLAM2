@@ -108,6 +108,7 @@ def mask_feature_mean(feat_map, gt_masks):
     """
     num_mask, mask_h, mask_w = gt_masks.shape
     C, H, W = feat_map.shape
+    assert C == 6, "The feature map should have 6 channels."
 
     # Resize masks to match feature map size using nearest neighbor interpolation
     if (mask_h, mask_w) != (H, W):
@@ -118,7 +119,7 @@ def mask_feature_mean(feat_map, gt_masks):
     # expand feat and masks for batch processing
     feat_expanded = feat_map.unsqueeze(0).expand(num_mask, *feat_map.shape)  # [num_mask, 6, H, W]
     masks_expanded = gt_masks.unsqueeze(1).expand(-1, feat_map.shape[0], -1, -1)  # [num_mask, 6, H, W]
-    masked_feats = ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5)   # in chuck to avoid OOM
+    masked_feats = ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=2)   # in chuck to avoid OOM
     mask_counts = masks_expanded.sum(dim=(2, 3))  # [num_mask, 6]
 
     # the number of pixels within each mask
@@ -152,6 +153,8 @@ def read_sam_masks(image_idx, mask_path):
         masks (torch.Tensor): the masks in shape of [num_masks, H, W].
     """
     mask_directory = Path(f"{mask_path}/{int(image_idx):05d}")
+    if not mask_directory.exists():
+        mask_directory = Path(f"{mask_path}/frame{int(image_idx):06d}")
     mask_files = mask_directory.glob("*.png")
     masks = []
     for mask_file in mask_files:

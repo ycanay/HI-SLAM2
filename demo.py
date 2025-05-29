@@ -110,7 +110,11 @@ if __name__ == '__main__':
     args.buffer = min(1000, N // 10 + 150) if args.buffer < 0 else args.buffer
     pbar = tqdm(range(N), desc="Processing keyframes")
     while 1:
-        (t, image, intrinsics, is_last) = queue.get()
+        try:
+            (t, image, intrinsics, is_last) = queue.get()
+        except Exception as e:
+            print(f"Error reading from queue: {e}")
+            break
         pbar.update()
 
         if hi2 is None:

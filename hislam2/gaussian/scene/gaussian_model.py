@@ -271,7 +271,7 @@ class GaussianModel:
             },
             {
                 "params": [self._ins_feat],
-                "lr": training_args.feature_lr,
+                "lr": training_args.ins_feature_lr,
                 "name": "ins_feat",
             },
         ]
@@ -303,7 +303,7 @@ class GaussianModel:
         for i in range(self._features_rest.shape[1] * self._features_rest.shape[2]):
             l.append("f_rest_{}".format(i))
         l.append("opacity")
-        for i in range(self.ins_feat.shape[1]):
+        for i in range(self._ins_feat.shape[1]):
             l.append("ins_feat_{}".format(i))
         for i in range(self._scaling.shape[1]):
             l.append("scale_{}".format(i))
