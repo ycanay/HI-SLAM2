@@ -217,12 +217,10 @@ class GSBackEnd(mp.Process):
             sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
             feature_mean = mask_feature_mean(ins_feat, sam_masks)
             s_loss = separation_loss(feature_mean)
-            c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-            loss_init += s_loss + c_loss
+            loss_init += s_loss
             if self.writer:
                 self.writer.add_scalar('InitLoss/loss_init', loss_init.item(), self.iteration_count)
                 self.writer.add_scalar('InitLoss/separation_loss', s_loss.item(), self.iteration_count)
-                self.writer.add_scalar('InitLoss/cohesion_loss', c_loss.item(), self.iteration_count)
                 if self.iteration_count % 100 == 0:
                     self.log_instance_feates('InitLoss/PCA_RGB_Image',ins_feat,self.iteration_count)
                     self.log_rgb_images('InitLoss/RGB_Image', image, self.iteration_count)
@@ -265,8 +263,7 @@ class GSBackEnd(mp.Process):
         for cam_idx, viewpoint in self.viewpoints.items():
             if cam_idx not in current_window_set:
                 random_viewpoint_stack.append(viewpoint)
-
-        for _ in range(iters):
+        for mapping_iteration in (pbar := trange(iters)):
             self.iteration_count += 1
 
             loss_mapping = 0
@@ -294,13 +291,11 @@ class GSBackEnd(mp.Process):
                 sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
                 feature_mean = mask_feature_mean(ins_feat, sam_masks)
                 s_loss = separation_loss(feature_mean)
-                c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-                loss_mapping += s_loss + c_loss
+                loss_mapping += s_loss
                 if self.writer:
                     self.writer.add_scalar('Loss/normal_loss', normal_loss.item(), self.iteration_count)
                     self.writer.add_scalar('Loss/rgbd_loss', rgbd_loss.item(), self.iteration_count)
                     self.writer.add_scalar('Loss/separation_loss', s_loss.item(), self.iteration_count)
-                    self.writer.add_scalar('Loss/cohesion_loss', c_loss.item(), self.iteration_count)
                     if self.iteration_count % 100 == 0:
                         self.log_instance_feates('Loss/PCA_RGB_Image',ins_feat,self.iteration_count)
                         self.log_rgb_images('Loss/RGB_Image', image, self.iteration_count)
@@ -343,6 +338,7 @@ class GSBackEnd(mp.Process):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 # self.gaussians.update_learning_rate(self.iteration_count)
+            pbar.set_description(f"Optimization step: {loss_mapping.item():.3f}")
 
     def color_refinement(self, iteration_total):
         Log("Starting color refinement")
@@ -378,16 +374,15 @@ class GSBackEnd(mp.Process):
             sam_masks = read_sam_masks(viewpoint_cam.tstamp, self.config["masks"]["mask_dir"]).cuda()
             feature_mean = mask_feature_mean(ins_feat, sam_masks)
             s_loss = separation_loss(feature_mean)
-            c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
 
             gt_image = viewpoint_cam.original_image.cuda()
             l1_loss_color = l1_loss(image, gt_image)
             ssim_loss = (1.0 - ssim(image, gt_image))
             loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss_color + self.opt_params.lambda_dssim * ssim_loss
             if iteration <= iteration_total / 2:
-                loss += (1.0 - self.opt_params.lambda_cohesion) *s_loss + self.opt_params.lambda_cohesion * c_loss
+                loss += (1.0 - self.opt_params.lambda_cohesion) *s_loss
             else:
-                loss += (1.0 - self.opt_params.lambda_cohesion) * c_loss + self.opt_params.lambda_cohesion * s_loss
+                loss += self.opt_params.lambda_cohesion * s_loss
             rgb_mapping_loss = get_loss_mapping_rgbd(self.config, image, depth, viewpoint_cam)
             loss += rgb_mapping_loss
             if self.writer:
@@ -395,7 +390,6 @@ class GSBackEnd(mp.Process):
                 self.writer.add_scalar('Refinement_Loss/l1_loss', l1_loss_color.item(), iteration)
                 self.writer.add_scalar('Refinement_Loss/ssim_loss', ssim_loss.item(), iteration)
                 self.writer.add_scalar('Refinement_Loss/separation_loss', s_loss.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
                 self.writer.add_scalar('Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration)
                 if iteration % 100 == 0:
                     self.log_instance_feates('Refinement_Loss/PCA_RGB_Image',ins_feat, iteration)
@@ -426,7 +420,6 @@ class GSBackEnd(mp.Process):
             self.writer.add_scalar('Refinement_Loss/l1_loss', l1_loss_color.item(), iteration_total+2)
             self.writer.add_scalar('Refinement_Loss/ssim_loss', ssim_loss.item(), iteration_total+2)
             self.writer.add_scalar('Refinement_Loss/separation_loss', s_loss.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/cohesion_loss', c_loss.item(), iteration_total+2)
             self.writer.add_scalar('Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration_total+2)
             self.log_instance_feates('Refinement_Loss/PCA_RGB_Image',ins_feat, iteration_total+2)
             self.log_rgb_images('Refinement_Loss/RGB_Image', image, iteration_total+2)
