@@ -21,31 +21,29 @@
 namespace BACKWARD
 {
 	void render(
-		const dim3 grid, const dim3 block,
+		const dim3 grid, dim3 block,
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
 		const float* bg_color,
-		const float* view_points,
+		const float* empty_ins_feats,
 		const float2* means2D,
 		const float4* conic_opacity,
 		const float* colors,
+		const float* ins_feats,
 		const float* depths,
-		const float* ts,
-		const float2* ray_planes,
 		const float* alphas,
-		const float* accum_depth,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
-		const float* dL_dpixel_depth,
-		const float focal_x, 
-		const float focal_y,
+		const float* dL_dout_ins_feats,
+		const float* dL_dpixel_depths,
+		const float* dL_dalphas,
 		float3* dL_dmean2D,
 		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors,
-		float* dL_dts,
-		float2* dL_dray_planes);
+		float* dL_dins_feats,
+		float* dL_ddepths);
 
 	void preprocess(
 		int P, int D, int M,
@@ -59,7 +57,6 @@ namespace BACKWARD
 		const float* cov3Ds,
 		const float* view,
 		const float* proj,
-		const float* proj_raw,
 		const float focal_x, float focal_y,
 		const float tan_fovx, float tan_fovy,
 		const glm::vec3* campos,
@@ -67,15 +64,11 @@ namespace BACKWARD
 		const float* dL_dconics,
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
-		const float* dL_dts,
-		const float2* dL_dray_plane,
+		float* dL_ddepth,
 		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot,
-		const float4* conic_opacity,
-		float* dL_dopacity,
-		float* dL_dtau);
+		glm::vec4* dL_drot);
 }
 
 #endif

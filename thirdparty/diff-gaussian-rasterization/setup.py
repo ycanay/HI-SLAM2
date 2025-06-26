@@ -12,9 +12,7 @@
 from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 import os
-
-archs = ['60', '61', '70', '72', '75', '80', '86', '87', '89']
-arch_flags = [f'-gencode=arch=compute_{arch},code=sm_{arch}' for arch in archs]
+os.path.dirname(os.path.abspath(__file__))
 
 setup(
     name="diff_gaussian_rasterization",
@@ -28,7 +26,7 @@ setup(
             "cuda_rasterizer/backward.cu",
             "rasterize_points.cu",
             "ext.cpp"],
-            extra_compile_args={"nvcc": arch_flags + ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
+            extra_compile_args={"nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
         ],
     cmdclass={
         'build_ext': BuildExtension

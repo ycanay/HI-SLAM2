@@ -28,7 +28,7 @@ Tracking:
 Training:
   init_itr_num: 1050
   init_gaussian_update: 100
-  init_gaussian_reset: 500
+  init_gaussian_reset: 550
   init_gaussian_th: 0.005
   init_gaussian_extent: 30
   gaussian_update_every: 150
@@ -56,6 +56,6 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.5
+  lambda_cohesion: 0.1
 masks:
   mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks"

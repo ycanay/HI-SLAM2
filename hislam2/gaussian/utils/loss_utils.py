@@ -174,6 +174,6 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
     mean_feats = feature_mean.unsqueeze(2).unsqueeze(3).expand(-1, -1, H, W)
     mean_feats_masked = ele_multip_in_chunks(mean_feats, mask_exp, 2)
 
-    # MSE loss between masked features and masked means
-    mse_loss = ((masked_feats - mean_feats_masked) ** 2).sum() / num_masks
-    return mse_loss
+    # Mean L1 loss between masked features and masked means
+    l1 = (torch.abs(masked_feats - mean_feats_masked)).mean()
+    return l1

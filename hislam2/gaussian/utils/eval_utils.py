@@ -19,6 +19,7 @@ def eval_rendering(
     gaussians,
     save_dir,
     background,
+    empty_ins_feats,
     projection_matrix,
     K,
     kf_idx,
@@ -41,7 +42,7 @@ def eval_rendering(
         frame = Camera.init_from_tracking(image.squeeze()/255.0, None, None, traj[idx], idx, projection_matrix, K)
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background)
+        rendering = render(frame, gaussians, background, empty_ins_feats)
         image = torch.clamp(rendering["render"], 0.0, 1.0)
         depth = rendering["depth"].detach().squeeze().cpu().numpy()
 
@@ -95,6 +96,7 @@ def eval_rendering_kf(
     gaussians,
     save_dir,
     background,
+    empty_ins_feats,
     iteration="final",
 ):
     psnr_array, ssim_array, lpips_array = [], [], []
@@ -102,7 +104,7 @@ def eval_rendering_kf(
     for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background)
+        rendering = render(frame, gaussians, background, empty_ins_feats)
         image = (torch.exp(frame.exposure_a)) * rendering["render"] + frame.exposure_b
         image = torch.clamp(image, 0.0, 1.0)
 
