@@ -41,6 +41,7 @@ Training:
   rgb_boundary_threshold: 0.01
   lambda_dnormal: 0.1
   compensate_exposure: false
+  optimize_ins_feats_step: 750
 
 opt_params:
   iteration_per_scene: 10

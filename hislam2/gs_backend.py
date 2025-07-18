@@ -29,6 +29,7 @@ class GSBackEnd(mp.Process):
         self.config = config
         
         self.iteration_count = 0
+        self.optimize_ins_feats_step = self.config["Training"]["optimize_ins_feats_step"]
         self.viewpoints = {}
         self.current_window = []
         self.initialized = False
@@ -211,14 +212,16 @@ class GSBackEnd(mp.Process):
             loss_init = get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
             sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
             feature_mean = mask_feature_mean(ins_feat, sam_masks)
-            s_loss = separation_loss(feature_mean)
-            c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-            loss_init += self.opt_params.lambda_cohesion * c_loss + (1 - self.opt_params.lambda_cohesion) * s_loss 
+            if self.iteration_count > self.optimize_ins_feats_step:
+                s_loss = separation_loss(feature_mean)
+                c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
+                loss_init += self.opt_params.lambda_cohesion * c_loss + (1 - self.opt_params.lambda_cohesion) * s_loss 
             if self.writer:
                 self.writer.add_scalar('InitLoss/loss_init', loss_init.item(), self.iteration_count)
-                self.writer.add_scalar('InitLoss/separation_loss', s_loss.item(), self.iteration_count)
-                self.writer.add_scalar('InitLoss/cohesion_loss', c_loss.item(), self.iteration_count)
-                if self.iteration_count % 100 == 0:
+                if self.iteration_count > self.optimize_ins_feats_step:
+                    self.writer.add_scalar('InitLoss/separation_loss', s_loss.item(), self.iteration_count)
+                    self.writer.add_scalar('InitLoss/cohesion_loss', c_loss.item(), self.iteration_count)
+                if self.iteration_count % 50 == 0:
                     self.log_instance_feates('InitLoss/PCA_RGB_Image',ins_feat,self.iteration_count)
                     self.log_rgb_images('InitLoss/RGB_Image', image, self.iteration_count)
             loss_init.backward()
