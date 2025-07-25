@@ -30,9 +30,11 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
     
     image_save_dir = f'{save_dir}/renders/image_{iteration}'
+    ins_feat_save_dir = f'{save_dir}/renders/ins_feat_{iteration}'
     depth_save_dir = f'{save_dir}/renders/depth_{iteration}'
     # vis_save_dir = f'{save_dir}/renders/vis_{iteration}'  
     os.makedirs(image_save_dir, exist_ok=True)
+    os.makedirs(ins_feat_save_dir, exist_ok=True)
     os.makedirs(depth_save_dir, exist_ok=True)
     # os.makedirs(vis_save_dir, exist_ok=True)
     
@@ -44,6 +46,9 @@ def eval_rendering(
 
         rendering = render(frame, gaussians, background, empty_ins_feats)
         image = torch.clamp(rendering["render"], 0.0, 1.0)
+        ins_feat = torch.clamp(rendering["rendered_features"], 0.0, 1.0)
+        ins_feat_1 = ins_feat[0:3]
+        ins_feat_2 = ins_feat[3:6]
         depth = rendering["depth"].detach().squeeze().cpu().numpy()
 
         if gtdepthdir is not None:
@@ -56,6 +61,8 @@ def eval_rendering(
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
         cv2.imwrite(f'{image_save_dir}/{idx:06d}.jpg', pred)
         cv2.imwrite(f'{depth_save_dir}/{idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
+        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_1.png', (ins_feat_1.detach().cpu().numpy() * 255).astype(np.uint8))
+        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_2.png', (ins_feat_2.detach().cpu().numpy() * 255).astype(np.uint8))
         # vis = np.concatenate((pred, cv2.imread(f'{save_dir}/renders/depth_{iteration}/{idx:06d}.png')), axis=0)
         # cv2.imwrite(f'{vis_save_dir}/{idx:06d}.jpg', vis)
 

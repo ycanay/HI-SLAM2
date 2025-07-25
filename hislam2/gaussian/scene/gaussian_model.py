@@ -599,3 +599,52 @@ class GaussianModel:
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
         )
         self.denom[update_filter] += 1
+
+    def load_from_ply(self, ply_path):
+        fields = [
+            'x', 'y', 'z',
+            'nx', 'ny', 'nz',
+            'f_dc_0', 'f_dc_1', 'f_dc_2',
+            'opacity',
+            'ins_feat_0', 'ins_feat_1', 'ins_feat_2',
+            'ins_feat_3', 'ins_feat_4', 'ins_feat_5',
+            'scale_0', 'scale_1', 'scale_2',
+            'rot_0', 'rot_1', 'rot_2', 'rot_3'
+        ]
+
+        dtype = np.dtype([(name, 'f4') for name in fields])
+
+        # Read header and find vertex count and byte offset
+        with open(ply_path, 'rb') as f:
+            header_lines = []
+            while True:
+                line = f.readline()
+                header_lines.append(line)
+                if line.strip() == b'end_header':
+                    break
+
+            # Decode and search for vertex count
+            vertex_count = 0
+            for line in header_lines:
+                if line.startswith(b'element vertex'):
+                    vertex_count = int(line.decode().split()[-1])
+                    break
+
+            # Sanity check
+            if vertex_count == 0:
+                raise ValueError("Could not determine number of vertices from header.")
+
+            # Read binary data
+            data = np.fromfile(f, dtype=dtype, count=vertex_count)
+
+        # Structured array is now loaded
+        array_2d = np.vstack([data[field] for field in fields]).T
+        print(f"Loaded {len(data)} vertices.")
+        print(array_2d[0])
+        self._xyz = torch.Tensor(array_2d[:, :3])  # Extract position data (x, y, z)
+        normals = torch.Tensor(array_2d[:, 3:6])  # Extract normal data
+        self._features_dc = torch.Tensor(array_2d[:, 6:9])  # Extract spherical harmonics data
+        self._opacity = torch.Tensor(array_2d[:, 9])  # Extract opacity data
+        self._ins_feat = torch.Tensor(array_2d[:, 10:16])
+        self._scaling = torch.Tensor(array_2d[:, 16:19])  # Extract scale data
+        self._rotation = torch.Tensor(array_2d[:, 19:23])  # Extract rotation data

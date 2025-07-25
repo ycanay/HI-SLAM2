@@ -166,6 +166,7 @@ class GSBackEnd(mp.Process):
                     gtdepth=viewpoint.depth.numpy()))
 
     def finalize(self):
+        self.gaussians.save_ply(f'{self.save_dir}/3dgs_before_opt.ply')
         self.color_refinement(iteration_total=self.gaussians.max_steps)
         self.gaussians.save_ply(f'{self.save_dir}/3dgs_final.ply')
 
