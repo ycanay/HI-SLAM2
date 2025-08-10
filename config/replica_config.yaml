@@ -7,23 +7,23 @@ Dataset:
 
 Tracking:
   motion_filter:
-    thresh: 2.4    # how much motion before considering new keyframe")
+    thresh: 2.4 # how much motion before considering new keyframe")
     skip_blur: False
   frontend:
-    keyframe_thresh: 4.0  # threshold to create a new keyframe")
+    keyframe_thresh: 4.0 # threshold to create a new keyframe")
     frontend_thresh: 16.0 # add edges between frames whithin this distance")
-    frontend_window: 25   # frontend optimization window")
-    frontend_radius: 2    # force edges between frames within radius")
-    frontend_nms: 1       # non-maximal supression of edges")
+    frontend_window: 25 # frontend optimization window")
+    frontend_radius: 2 # force edges between frames within radius")
+    frontend_nms: 1 # non-maximal supression of edges")
     mono_depth_alpha: 0.001
   backend:
-    backend_thresh: 22.0  # add loop closure edges within this distance (larger is more edges)')
-    backend_radius: 2     # connect neighbors within radius (larger is more edges)')
-    backend_nms: 3        # non-maximal supression of edges (smaller is more edges)')
+    backend_thresh: 22.0 # add loop closure edges within this distance (larger is more edges)')
+    backend_radius: 2 # connect neighbors within radius (larger is more edges)')
+    backend_nms: 3 # non-maximal supression of edges (smaller is more edges)')
     covis_thresh: 0.2
   pgba:
     active: False
-    pgba_thresh: 22.0     # add loop closure edges within this distance (larger is more edges)')
+    pgba_thresh: 22.0 # add loop closure edges within this distance (larger is more edges)')
 
 Training:
   init_itr_num: 1050
@@ -57,6 +57,7 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.1
+  lambda_cohesion: 0.05
 masks:
-  mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks"
+  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks_parts"
+  semantic_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/semantic_segmentation"

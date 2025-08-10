@@ -13,9 +13,9 @@ try:
 except ImportError:
     SummaryWriter = None
 
-from util.utils import Log, clone_obj, read_sam_masks, mask_feature_mean
+from util.utils import Log, clone_obj, read_masks, mask_feature_mean
 from gaussian.renderer import render
-from gaussian.utils.loss_utils import l1_loss, ssim, separation_loss, cohesion_loss
+from gaussian.utils.loss_utils import l1_loss, ssim, separation_loss, cohesion_loss, kl_regularization_loss
 from gaussian.scene.gaussian_model import GaussianModel
 from gaussian.utils.graphics_utils import getProjectionMatrix2
 from gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_normal, get_loss_mapping_rgbd
@@ -23,11 +23,12 @@ from gaussian.utils.camera_utils import Camera
 from gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from gaussian.gui import gui_utils, slam_gui
 
+
 class GSBackEnd(mp.Process):
     def __init__(self, config, save_dir, use_gui=False):
         super().__init__()
         self.config = config
-        
+
         self.iteration_count = 0
         self.optimize_ins_feats_step = self.config["Training"]["optimize_ins_feats_step"]
         self.viewpoints = {}
@@ -42,14 +43,17 @@ class GSBackEnd(mp.Process):
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
         self.gaussians.init_lr(6.0)
         self.gaussians.training_setup(self.opt_params)
-        self.background = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
-        self.empty_ins_feats = torch.tensor([0, 0, 0, 0, 0, 0], dtype=torch.float32, device="cuda")
+        self.background = torch.tensor(
+            [0, 0, 0], dtype=torch.float32, device="cuda")
+        self.empty_ins_feats = torch.tensor(
+            [0, 0, 0, 0, 0, 0], dtype=torch.float32, device="cuda")
 
         self.cameras_extent = 6.0
         self.set_hyperparams()
 
         if SummaryWriter:
-            self.writer = SummaryWriter(log_dir=os.path.join(save_dir, 'tensorboard'))
+            self.writer = SummaryWriter(
+                log_dir=os.path.join(save_dir, 'tensorboard'))
         else:
             self.writer = None
 
@@ -62,7 +66,8 @@ class GSBackEnd(mp.Process):
                 q_main2vis=self.q_main2vis,
                 q_vis2main=self.q_vis2main,
             )
-            gui_process = mp.Process(target=slam_gui.run, args=(self.params_gui,))
+            gui_process = mp.Process(
+                target=slam_gui.run, args=(self.params_gui,))
             gui_process.start()
             time.sleep(3)
 
@@ -71,12 +76,16 @@ class GSBackEnd(mp.Process):
         assert C == 6, "Expected 6-dimensional features"
         cpu_ins_feat = ins_feat.clone().cpu().detach()
         tensor1, tensor2 = torch.split(cpu_ins_feat, 3, dim=0)
-        tensor1 = (tensor1 - tensor1.min()) / (tensor1.max() - tensor1.min() + 1e-5)
-        tensor2 = (tensor2 - tensor2.min()) / (tensor2.max() - tensor2.min() + 1e-5)
-        self.writer.add_image(f'{tag}1', tensor1, global_step=step, dataformats='CHW')
-        self.writer.add_image(f'{tag}2', tensor2, global_step=step, dataformats='CHW')
+        tensor1 = (tensor1 - tensor1.min()) / \
+            (tensor1.max() - tensor1.min() + 1e-5)
+        tensor2 = (tensor2 - tensor2.min()) / \
+            (tensor2.max() - tensor2.min() + 1e-5)
+        self.writer.add_image(f'{tag}1', tensor1,
+                              global_step=step, dataformats='CHW')
+        self.writer.add_image(f'{tag}2', tensor2,
+                              global_step=step, dataformats='CHW')
         self.writer.flush()
-        
+
     def log_rgb_images(self, tag, image, step):
         C, H, W = image.shape
         assert C == 3, "Expected 6-dimensional features"
@@ -85,7 +94,8 @@ class GSBackEnd(mp.Process):
 
         rgb_image = flat_features.reshape(H, W, 3)
         tensor_image = torch.from_numpy(rgb_image).permute(2, 0, 1)
-        self.writer.add_image(f'{tag}', tensor_image, global_step=step, dataformats='CHW')
+        self.writer.add_image(f'{tag}', tensor_image,
+                              global_step=step, dataformats='CHW')
         self.writer.flush()
 
     def set_hyperparams(self):
@@ -93,27 +103,30 @@ class GSBackEnd(mp.Process):
         self.init_gaussian_update = self.config["Training"]["init_gaussian_update"]
         self.init_gaussian_reset = self.config["Training"]["init_gaussian_reset"]
         self.init_gaussian_th = self.config["Training"]["init_gaussian_th"]
-        self.init_gaussian_extent = self.cameras_extent * self.config["Training"]["init_gaussian_extent"]
+        self.init_gaussian_extent = self.cameras_extent * \
+            self.config["Training"]["init_gaussian_extent"]
         self.gaussian_update_every = self.config["Training"]["gaussian_update_every"]
         self.gaussian_update_offset = self.config["Training"]["gaussian_update_offset"]
         self.gaussian_th = self.config["Training"]["gaussian_th"]
-        self.gaussian_extent = self.cameras_extent * self.config["Training"]["gaussian_extent"]
+        self.gaussian_extent = self.cameras_extent * \
+            self.config["Training"]["gaussian_extent"]
         self.gaussian_reset = self.config["Training"]["gaussian_reset"]
         self.size_threshold = self.config["Training"]["size_threshold"]
         self.window_size = self.config["Training"]["window_size"]
         self.lambda_dnormal = self.config["Training"]["lambda_dnormal"]
 
-
     def process_track_data(self, packet):
         if not hasattr(self, "projection_matrix"):
             H, W = packet["images"].shape[-2:]
             self.K = K = list(packet["intrinsics"][0]) + [W, H]
-            self.projection_matrix = getProjectionMatrix2(znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
+            self.projection_matrix = getProjectionMatrix2(
+                znear=0.01, zfar=100.0, fx=K[0], fy=K[1], cx=K[2], cy=K[3], W=W, H=H).transpose(0, 1).cuda()
 
         if packet['pose_updates'] is not None:
             with torch.no_grad():
                 tstamps = packet['tstamp']
-                indices = (tstamps.unsqueeze(1) == self.gaussians.unique_kfIDs.unsqueeze(0)).nonzero()[:, 0]
+                indices = (tstamps.unsqueeze(
+                    1) == self.gaussians.unique_kfIDs.unsqueeze(0)).nonzero()[:, 0]
                 updates = packet['pose_updates'].cuda()[indices]
                 updates_scale = packet['scale_updates'].cuda()[indices]
 
@@ -123,10 +136,11 @@ class GSBackEnd(mp.Process):
 
                 scale = self.gaussians.get_scaling
                 scale = scale / updates_scale
-                self.gaussians._scaling[:] = self.gaussians.scaling_inverse_activation(scale)
- 
+                self.gaussians._scaling[:] = self.gaussians.scaling_inverse_activation(
+                    scale)
+
                 rot = SO3(self.gaussians.get_rotation)
-                rot = SO3(updates.data[:,3:]) * rot
+                rot = SO3(updates.data[:, 3:]) * rot
                 self.gaussians._rotation[:] = rot.data
 
         w2c = SE3(packet["poses"]).matrix().cuda()
@@ -134,18 +148,22 @@ class GSBackEnd(mp.Process):
             idx = idx.item()
             idx = packet['tstamp'][i].item()
             tstamp = packet['tstamp'][i].item()
-            viewpoint = Camera.init_from_tracking(packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp)
+            viewpoint = Camera.init_from_tracking(
+                packet["images"][i]/255.0, packet["depths"][i], packet["normals"][i], w2c[i], idx, self.projection_matrix, self.K, tstamp)
             if idx not in self.current_window:
-                self.current_window = [idx] + self.current_window[:-1] if len(self.current_window) > 10 else [idx] + self.current_window
+                self.current_window = [idx] + self.current_window[:-1] if len(
+                    self.current_window) > 10 else [idx] + self.current_window
                 if not self.initialized:
                     self.reset()
                     self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
+                    self.add_next_kf(
+                        0, viewpoint, depth_map=packet["depths"][0].numpy(), init=True)
                     self.initialize_map(0, viewpoint)
                     self.initialized = True
                 elif idx not in self.viewpoints:
                     self.viewpoints[idx] = viewpoint
-                    self.add_next_kf(idx, viewpoint, depth_map=packet["depths"][i].numpy())
+                    self.add_next_kf(
+                        idx, viewpoint, depth_map=packet["depths"][i].numpy())
                 else:
                     self.viewpoints[idx] = viewpoint
 
@@ -153,9 +171,11 @@ class GSBackEnd(mp.Process):
         # self.map(self.current_window, iters=1, prune=True)
 
         if self.use_gui:
-            keyframes = [self.viewpoints[kf_idx] for kf_idx in self.current_window]
+            keyframes = [self.viewpoints[kf_idx]
+                         for kf_idx in self.current_window]
             current_window_dict = {}
-            current_window_dict[self.current_window[0]] = self.current_window[1:]
+            current_window_dict[self.current_window[0]
+                                ] = self.current_window[1:]
             self.q_main2vis.put(
                 gui_utils.GaussianPacket(
                     gaussians=clone_obj(self.gaussians),
@@ -181,9 +201,10 @@ class GSBackEnd(mp.Process):
 
     @torch.no_grad()
     def eval_rendering(self, gtimages, gtdepthdir, traj, kf_idx):
-        eval_rendering(gtimages, gtdepthdir, traj, self.gaussians,self.save_dir, self.background, self.empty_ins_feats,
-            self.projection_matrix, self.K, kf_idx, iteration="after_opt")
-        eval_rendering_kf(self.viewpoints, self.gaussians, self.save_dir, self.background,self.empty_ins_feats, iteration="after_opt")
+        eval_rendering(gtimages, gtdepthdir, traj, self.gaussians, self.save_dir, self.background, self.empty_ins_feats,
+                       self.projection_matrix, self.K, kf_idx, iteration="after_opt")
+        eval_rendering_kf(self.viewpoints, self.gaussians, self.save_dir,
+                          self.background, self.empty_ins_feats, iteration="after_opt")
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(
@@ -200,7 +221,8 @@ class GSBackEnd(mp.Process):
     def initialize_map(self, cur_frame_idx, viewpoint):
         for mapping_iteration in (pbar := trange(self.init_itr_num)):
             self.iteration_count += 1
-            render_pkg = render(viewpoint, self.gaussians, self.background, self.empty_ins_feats)
+            render_pkg = render(viewpoint, self.gaussians,
+                                self.background, self.empty_ins_feats)
             (image, viewspace_point_tensor, visibility_filter, radii, depth, alpha, ins_feat) = (
                 render_pkg["render"],
                 render_pkg["viewspace_points"],
@@ -210,21 +232,34 @@ class GSBackEnd(mp.Process):
                 render_pkg["alpha"],
                 render_pkg["rendered_features"],
             )
-            loss_init = get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
-            sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
-            feature_mean = mask_feature_mean(ins_feat, sam_masks)
+            loss_init = get_loss_mapping_rgbd(
+                self.config, image, depth, viewpoint)
             if self.iteration_count > self.optimize_ins_feats_step:
+                sam_masks = read_masks(
+                    viewpoint.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
+                feature_mean = mask_feature_mean(ins_feat, sam_masks)
+                semantic_masks = read_masks(
+                    viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+                semantic_feature_mean = mask_feature_mean(
+                    ins_feat, semantic_masks)
                 s_loss = separation_loss(feature_mean)
-                c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-                loss_init += self.opt_params.lambda_cohesion * c_loss + (1 - self.opt_params.lambda_cohesion) * s_loss 
+                c_loss = cohesion_loss(
+                    semantic_masks, ins_feat, semantic_feature_mean)
+                loss_init += s_loss + c_loss * self.opt_params.lambda_cohesion
+                # loss_init += self.opt_params.lambda_cohesion * c_loss + (1 - self.opt_params.lambda_cohesion) * s_loss
             if self.writer:
-                self.writer.add_scalar('InitLoss/loss_init', loss_init.item(), self.iteration_count)
+                self.writer.add_scalar(
+                    'InitLoss/loss_init', loss_init.item(), self.iteration_count)
                 if self.iteration_count > self.optimize_ins_feats_step:
-                    self.writer.add_scalar('InitLoss/separation_loss', s_loss.item(), self.iteration_count)
-                    self.writer.add_scalar('InitLoss/cohesion_loss', c_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'InitLoss/separation_loss', s_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'InitLoss/cohesion_loss', c_loss.item(), self.iteration_count)
                 if self.iteration_count % 50 == 0:
-                    self.log_instance_feates('InitLoss/PCA_RGB_Image',ins_feat,self.iteration_count)
-                    self.log_rgb_images('InitLoss/RGB_Image', image, self.iteration_count)
+                    self.log_instance_feates(
+                        'InitLoss/PCA_RGB_Image', ins_feat, self.iteration_count)
+                    self.log_rgb_images(
+                        'InitLoss/RGB_Image', image, self.iteration_count)
             loss_init.backward()
 
             with torch.no_grad():
@@ -257,7 +292,8 @@ class GSBackEnd(mp.Process):
         if len(current_window) == 0:
             return
 
-        viewpoint_stack = [self.viewpoints[kf_idx] for kf_idx in current_window]
+        viewpoint_stack = [self.viewpoints[kf_idx]
+                           for kf_idx in current_window]
         random_viewpoint_stack = []
 
         current_window_set = set(current_window)
@@ -272,9 +308,11 @@ class GSBackEnd(mp.Process):
             visibility_filter_acm = []
             radii_acm = []
 
-            viewpoints = viewpoint_stack + [random_viewpoint_stack[idx] for idx in torch.randperm(len(random_viewpoint_stack))[:2]]
+            viewpoints = viewpoint_stack + [random_viewpoint_stack[idx]
+                                            for idx in torch.randperm(len(random_viewpoint_stack))[:2]]
             for viewpoint in viewpoints:
-                render_pkg = render(viewpoint, self.gaussians, self.background, self.empty_ins_feats)
+                render_pkg = render(viewpoint, self.gaussians,
+                                    self.background, self.empty_ins_feats)
                 image, viewspace_point_tensor, visibility_filter, radii, depth, alpha, ins_feat = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
@@ -283,36 +321,53 @@ class GSBackEnd(mp.Process):
                     render_pkg["depth"],
                     render_pkg["alpha"],
                     render_pkg["rendered_features"],
-                    )
+                )
 
                 normal_loss = get_loss_normal(depth, viewpoint)
                 loss_mapping += self.lambda_dnormal * normal_loss / 10.
-                rgbd_loss = get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
+                rgbd_loss = get_loss_mapping_rgbd(
+                    self.config, image, depth, viewpoint)
                 loss_mapping += rgbd_loss
-                sam_masks = read_sam_masks(viewpoint.tstamp, self.config["masks"]["mask_dir"]).cuda()
+                sam_masks = read_masks(
+                    viewpoint.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
                 feature_mean = mask_feature_mean(ins_feat, sam_masks)
                 s_loss = separation_loss(feature_mean)
                 c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-                loss_mapping += self.opt_params.lambda_cohesion * c_loss + (1 - self.opt_params.lambda_cohesion) * s_loss 
+                loss_mapping += self.opt_params.lambda_cohesion * c_loss + s_loss
+                r_loss = kl_regularization_loss(
+                    self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
+                loss_mapping += r_loss
                 if self.writer:
-                    self.writer.add_scalar('Loss/normal_loss', normal_loss.item(), self.iteration_count)
-                    self.writer.add_scalar('Loss/rgbd_loss', rgbd_loss.item(), self.iteration_count)
-                    self.writer.add_scalar('Loss/separation_loss', s_loss.item(), self.iteration_count)
-                    self.writer.add_scalar('Loss/cohesion_loss', c_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'Loss/normal_loss', normal_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'Loss/rgbd_loss', rgbd_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'Loss/separation_loss', s_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'Loss/kl_regularization_loss', r_loss.item(), self.iteration_count)
+                    self.writer.add_scalar(
+                        'Loss/cohesion_loss', c_loss.item(), self.iteration_count)
                     if self.iteration_count % 100 == 0:
-                        self.log_instance_feates('Loss/PCA_RGB_Image',ins_feat,self.iteration_count)
-                        self.log_rgb_images('Loss/RGB_Image', image, self.iteration_count)
+                        self.log_instance_feates(
+                            'Loss/PCA_RGB_Image', ins_feat, self.iteration_count)
+                        self.log_rgb_images(
+                            'Loss/RGB_Image', image, self.iteration_count)
 
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
 
             scaling = self.gaussians.get_scaling
-            isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
+            isotropic_loss = torch.abs(
+                scaling - scaling.mean(dim=1).view(-1, 1))
             loss_mapping += 10 * isotropic_loss.mean()
+            if self.writer:
+                self.writer.add_scalar(
+                    'Loss/loss_mapping', loss_mapping.mean().item(), self.iteration_count)
             loss_mapping.backward()
             # Log loss to TensorBoard
-            ## Deinsifying / Pruning Gaussians
+            # Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 for idx in range(len(viewspace_point_tensor_acm)):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
@@ -332,11 +387,12 @@ class GSBackEnd(mp.Process):
                         self.size_threshold,
                     )
 
-                ## Opacity reset
+                # Opacity reset
                 self.gaussian_reset = 501
                 if (self.iteration_count % self.gaussian_reset) == 0 and (not update_gaussian):
                     Log("Resetting the opacity of non-visible Gaussians")
-                    self.gaussians.reset_opacity_nonvisible(visibility_filter_acm)
+                    self.gaussians.reset_opacity_nonvisible(
+                        visibility_filter_acm)
 
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
@@ -348,57 +404,81 @@ class GSBackEnd(mp.Process):
         opt_params = []
         for view in self.viewpoints.values():
             opt_params.append({
-                    "params": [view.cam_rot_delta],
-                    "lr": self.config["opt_params"]["pose_lr"],
-                    "name": "rot_{}".format(view.uid)})
+                "params": [view.cam_rot_delta],
+                "lr": self.config["opt_params"]["pose_lr"],
+                "name": "rot_{}".format(view.uid)})
             opt_params.append({
-                    "params": [view.cam_trans_delta],
-                    "lr": self.config["opt_params"]["pose_lr"],
-                    "name": "trans_{}".format(view.uid)})
+                "params": [view.cam_trans_delta],
+                "lr": self.config["opt_params"]["pose_lr"],
+                "name": "trans_{}".format(view.uid)})
             if self.config["Training"]["compensate_exposure"]:
                 opt_params.append({
-                        "params": [view.exposure_a],
-                        "lr": self.config["opt_params"]["exposure_lr"],
-                        "name": "exposure_a_{}".format(view.uid)})
+                    "params": [view.exposure_a],
+                    "lr": self.config["opt_params"]["exposure_lr"],
+                    "name": "exposure_a_{}".format(view.uid)})
                 opt_params.append({
-                        "params": [view.exposure_b],
-                        "lr": self.config["opt_params"]["exposure_lr"],
-                        "name": "exposure_b_{}".format(view.uid)})
+                    "params": [view.exposure_b],
+                    "lr": self.config["opt_params"]["exposure_lr"],
+                    "name": "exposure_b_{}".format(view.uid)})
         self.keyframe_optimizers = torch.optim.Adam(opt_params)
 
         for iteration in (pbar := trange(1, iteration_total + 1)):
             viewpoint_idx_stack = list(self.viewpoints.keys())
-            viewpoint_cam_idx = viewpoint_idx_stack.pop(random.randint(0, len(viewpoint_idx_stack) - 1))
+            viewpoint_cam_idx = viewpoint_idx_stack.pop(
+                random.randint(0, len(viewpoint_idx_stack) - 1))
             viewpoint_cam = self.viewpoints[viewpoint_cam_idx]
-            render_pkg = render(viewpoint_cam, self.gaussians, self.background, self.empty_ins_feats)
+            render_pkg = render(viewpoint_cam, self.gaussians,
+                                self.background, self.empty_ins_feats)
             image, depth, ins_feat = render_pkg["render"], render_pkg["depth"], render_pkg["rendered_features"]
-            image = (torch.exp(viewpoint_cam.exposure_a)) * image + viewpoint_cam.exposure_b
-            sam_masks = read_sam_masks(viewpoint_cam.tstamp, self.config["masks"]["mask_dir"]).cuda()
+            image = (torch.exp(viewpoint_cam.exposure_a)) * \
+                image + viewpoint_cam.exposure_b
+            sam_masks = read_masks(
+                viewpoint_cam.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
+            semantic_masks = read_masks(
+                viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
             feature_mean = mask_feature_mean(ins_feat, sam_masks)
             s_loss = separation_loss(feature_mean)
-            c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-
+            semantic_feature_mean = mask_feature_mean(
+                ins_feat, semantic_masks)
+            c_loss = cohesion_loss(
+                semantic_masks, ins_feat, semantic_feature_mean)
+            r_loss = kl_regularization_loss(
+                self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
             gt_image = viewpoint_cam.original_image.cuda()
             l1_loss_color = l1_loss(image, gt_image)
             ssim_loss = (1.0 - ssim(image, gt_image))
-            loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss_color + self.opt_params.lambda_dssim * ssim_loss
-            loss += (1.0 - self.opt_params.lambda_cohesion) * s_loss + self.opt_params.lambda_cohesion * c_loss
-            rgb_mapping_loss = get_loss_mapping_rgbd(self.config, image, depth, viewpoint_cam)
+            loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss_color + \
+                self.opt_params.lambda_dssim * ssim_loss
+            loss += s_loss + c_loss * self.opt_params.lambda_cohesion + r_loss
+            rgb_mapping_loss = get_loss_mapping_rgbd(
+                self.config, image, depth, viewpoint_cam)
             loss += rgb_mapping_loss
             if self.writer:
-                self.writer.add_scalar('Refinement_Loss/color_refinement', loss.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/l1_loss', l1_loss_color.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/ssim_loss', ssim_loss.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/separation_loss', s_loss.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
-                self.writer.add_scalar('Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/color_refinement', loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/l1_loss', l1_loss_color.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/ssim_loss', ssim_loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/separation_loss', s_loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
+                self.writer.add_scalar(
+                    'Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration)
                 if iteration % 100 == 0:
-                    self.log_instance_feates('Refinement_Loss/PCA_RGB_Image',ins_feat, iteration)
-                    self.log_rgb_images('Refinement_Loss/RGB_Image', image, iteration)
+                    self.log_instance_feates(
+                        'Refinement_Loss/PCA_RGB_Image', ins_feat, iteration)
+                    self.log_rgb_images(
+                        'Refinement_Loss/RGB_Image', image, iteration)
             if iteration < 7000:
-                loss += self.lambda_dnormal * get_loss_normal(depth, viewpoint_cam)
+                loss += self.lambda_dnormal * \
+                    get_loss_normal(depth, viewpoint_cam)
             else:
-                loss += self.lambda_dnormal * get_loss_normal(depth, viewpoint_cam) / 2
+                loss += self.lambda_dnormal * \
+                    get_loss_normal(depth, viewpoint_cam) / 2
             loss.backward()
             # Log color refinement loss to TensorBoard
             with torch.no_grad():
@@ -411,18 +491,30 @@ class GSBackEnd(mp.Process):
                 update_pose(viewpoint_cam)
 
             if self.use_gui and iteration % 50 == 0:
-                self.q_main2vis.put(gui_utils.GaussianPacket(gaussians=clone_obj(self.gaussians)))
+                self.q_main2vis.put(gui_utils.GaussianPacket(
+                    gaussians=clone_obj(self.gaussians)))
 
-            pbar.set_description(f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
+            pbar.set_description(
+                f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
 
         Log("Map refinement done")
         if self.writer:
-            self.writer.add_scalar('Refinement_Loss/color_refinement', loss.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/l1_loss', l1_loss_color.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/ssim_loss', ssim_loss.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/separation_loss', s_loss.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/cohesion_loss', c_loss.item(), iteration_total+2)
-            self.writer.add_scalar('Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration_total+2)
-            self.log_instance_feates('Refinement_Loss/PCA_RGB_Image',ins_feat, iteration_total+2)
-            self.log_rgb_images('Refinement_Loss/RGB_Image', image, iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/color_refinement', loss.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/l1_loss', l1_loss_color.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/ssim_loss', ssim_loss.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/separation_loss', s_loss.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/cohesion_loss', c_loss.item(), iteration_total+2)
+            self.writer.add_scalar(
+                'Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration_total+2)
+            self.log_instance_feates(
+                'Refinement_Loss/PCA_RGB_Image', ins_feat, iteration_total+2)
+            self.log_rgb_images('Refinement_Loss/RGB_Image',
+                                image, iteration_total+2)
             self.writer.close()

@@ -177,3 +177,40 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
     # Mean L1 loss between masked features and masked means
     l1 = (torch.abs(masked_feats - mean_feats_masked)).mean()
     return l1
+
+def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors):
+    """
+    Regularization loss over instance features using KL divergence between softmaxed features.
+
+    Args:
+        ins_feat (Tensor): [N, 6] instance features
+        gaussians (Tensor): [N, 3] positions (used for nearest neighbor search)
+        num_of_samples (int): number of sampled points (m)
+        num_of_neighbors (int): number of nearest neighbors (k)
+
+    Returns:
+        Tensor: scalar regularization loss
+    """
+    N, D = ins_feat.shape
+    device = ins_feat.device
+
+    # Step 1: Sample m indices
+    sample_indices = torch.randperm(N, device=device)[:num_of_samples]  # [m]
+    sampled_pos = gaussians[sample_indices]           # [m, 3]
+    sampled_feat = ins_feat[sample_indices]           # [m, D]
+
+    # Step 2: Compute distances and get k nearest neighbors (excluding self if necessary)
+    dists = torch.cdist(sampled_pos, gaussians)       # [m, N]
+    neighbor_indices = dists.topk(num_of_neighbors, largest=False).indices  # [m, k]
+    neighbor_feats = ins_feat[neighbor_indices]       # [m, k, D]
+
+    # Step 3: Softmax over feature dimension
+    sampled_softmax = F.softmax(sampled_feat, dim=-1).unsqueeze(1)       # [m, 1, D]
+    neighbor_softmax = F.softmax(neighbor_feats, dim=-1)                 # [m, k, D]
+
+    # Step 4: Compute KL divergence: KL(P || Q) = sum P * log(P / Q)
+    eps = 1e-8  # for numerical stability
+    kl_div = sampled_softmax * torch.log((sampled_softmax + eps) / (neighbor_softmax + eps))  # [m, k, D]
+    loss = kl_div.sum(dim=-1).mean()  # scalar
+
+    return loss

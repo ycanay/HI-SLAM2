@@ -3,7 +3,8 @@ import torch_fpsample
 from sklearn.cluster import KMeans
 import numpy as np
 
-def fps_indices(gaussians:torch.Tensor, num_clusters:int) -> torch.Tensor:
+
+def fps_indices(gaussians: torch.Tensor, num_clusters: int) -> torch.Tensor:
     """
     Performs farthest point sampling on the given gaussians tensor.
     args:
@@ -18,8 +19,10 @@ def fps_indices(gaussians:torch.Tensor, num_clusters:int) -> torch.Tensor:
     points, indices = torch_fpsample.sample(gaussians, num_clusters)
     return indices
 
-#TODO: Later implement own version
-def incremental_clustering(gaussians:torch.Tensor, ins_feats:torch.Tensor, num_clusters:int) -> torch.Tensor:
+# TODO: Later implement own version
+
+
+def incremental_clustering(gaussians: torch.Tensor, ins_feats: torch.Tensor, num_clusters: int) -> torch.Tensor:
     """
     Incrementally clusters the gaussians tensor by sampling a subset of indices.
     Starting with the fps indices, itereatively creates clusters according to their distance and instance features.
@@ -40,8 +43,9 @@ def incremental_clustering(gaussians:torch.Tensor, ins_feats:torch.Tensor, num_c
     fps_ids = fps_indices(gaussians, num_clusters)
 
     all_indices = list(range(gaussians.shape[0]))
-    
-def over_segmentation(gaussians:torch.Tensor, features:torch.Tensor, num_clusters:int) -> torch.Tensor:
+
+
+def over_segmentation(gaussians: torch.Tensor, features: torch.Tensor, num_clusters: int) -> torch.Tensor:
     """
     Over-segments the gaussians tensor by sampling a subset of indices.
     args:
@@ -57,16 +61,16 @@ def over_segmentation(gaussians:torch.Tensor, features:torch.Tensor, num_cluster
     assert features.shape[1] == 6, "features must have at least one dimension."
     assert gaussians.shape[0] >= num_clusters, "num_clusters must be less than or equal to the number of gaussians."
 
-    positional_encodings = positional_encoding_3d_batch(gaussians.cpu())
+    positional_encodings = gaussians.cpu()
     concat_vector = torch.cat((positional_encodings, features), dim=1)
-    cluster_centers, cluster_indexes = torch_fpsample.sample(concat_vector, num_clusters)
+    concat_vector = concat_vector - concat_vector.mean(dim=0, keepdim=True)
+    concat_vector = concat_vector / \
+        (concat_vector.std(dim=0, keepdim=True) + 1e-6)
+    cluster_centers, cluster_indexes = torch_fpsample.sample(
+        concat_vector, num_clusters)
     kmeans = KMeans(n_clusters=num_clusters, init=cluster_centers)
     kmeans.fit(concat_vector.cpu().numpy())
     return torch.Tensor(kmeans.labels_)
-    # cluster_centers, cluster_indexes = torch_fpsample.sample(features, num_clusters)
-    # kmeans = KMeans(n_clusters=num_clusters, init=cluster_centers)
-    # kmeans.fit(features.cpu().numpy())
-    # return torch.Tensor(kmeans.labels_)
 
 
 def positional_encoding_3d_batch(coords: torch.Tensor, dim_total: int = 3) -> torch.Tensor:
@@ -82,9 +86,11 @@ def positional_encoding_3d_batch(coords: torch.Tensor, dim_total: int = 3) -> to
     def encode(coord_column: torch.Tensor) -> torch.Tensor:
         N = coord_column.shape[0]
         div_term = torch.exp(
-            torch.arange(0, dim_per_coord, 2, device=device).float() * (-torch.log(torch.tensor(10000.0)) / dim_per_coord)
+            torch.arange(0, dim_per_coord, 2, device=device).float(
+            ) * (-torch.log(torch.tensor(10000.0)) / dim_per_coord)
         )  # (dim_per_coord / 2,)
-        sin_term = torch.sin(coord_column[:, None] * div_term)  # (N, dim_per_coord / 2)
+        # (N, dim_per_coord / 2)
+        sin_term = torch.sin(coord_column[:, None] * div_term)
         cos_term = torch.cos(coord_column[:, None] * div_term)
         pe = torch.zeros(N, dim_per_coord, device=device)
         pe[:, 0::2] = sin_term

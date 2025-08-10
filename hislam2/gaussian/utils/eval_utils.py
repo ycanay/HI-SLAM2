@@ -59,10 +59,14 @@ def eval_rendering(
 
         pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
+        pred_feat_1 = (ins_feat_1.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        pred_feat_2 = (ins_feat_2.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        pred_feat_1 = cv2.cvtColor(pred_feat_1, cv2.COLOR_BGR2RGB)
+        pred_feat_2 = cv2.cvtColor(pred_feat_2, cv2.COLOR_BGR2RGB)
         cv2.imwrite(f'{image_save_dir}/{idx:06d}.jpg', pred)
         cv2.imwrite(f'{depth_save_dir}/{idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
-        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_1.png', (ins_feat_1.detach().cpu().numpy() * 255).astype(np.uint8))
-        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_2.png', (ins_feat_2.detach().cpu().numpy() * 255).astype(np.uint8))
+        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_1.png', pred_feat_1)
+        cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_2.png', pred_feat_2)
         # vis = np.concatenate((pred, cv2.imread(f'{save_dir}/renders/depth_{iteration}/{idx:06d}.png')), axis=0)
         # cv2.imwrite(f'{vis_save_dir}/{idx:06d}.jpg', vis)
 
