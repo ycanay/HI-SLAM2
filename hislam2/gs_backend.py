@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 from tqdm import trange
 from munch import munchify
 from lietorch import SE3, SO3
+from gaussian.utils.post_processing import create_clusters_iterative
 from sklearn.decomposition import PCA
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -496,6 +497,9 @@ class GSBackEnd(mp.Process):
 
             pbar.set_description(
                 f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
+
+        self.gaussians.cluster_labels = create_clusters_iterative(self.gaussians.get_ins_feat, self.gaussians.get_xyz,
+                                                                  num_iterations=5, num_init_clusters=128, verbose=True).device(self.gaussians.get_ins_feat.device)
 
         Log("Map refinement done")
         if self.writer:

@@ -81,6 +81,10 @@ def build_adjacency_matrix(points: torch.Tensor, labels: torch.Tensor, clusters:
         unique_voxels % resolution
     ], dim=1)
 
+    # Build a mapping from voxel coordinate tuple to index for fast lookup
+    voxel_coord_map = {tuple(coord.tolist()): idx for idx,
+                       coord in enumerate(voxel_coords)}
+
     voxel_clusters = [[] for _ in range(len(unique_voxels))]
     for i, lbl in zip(inverse_indices.tolist(), labels.tolist()):
         voxel_clusters[i].append(lbl)
@@ -88,41 +92,49 @@ def build_adjacency_matrix(points: torch.Tensor, labels: torch.Tensor, clusters:
                       for v in voxel_clusters]
 
     K = int(labels.max().item()) + 1
-    avg_features = [clusters[i]['mean'].to(device) if isinstance(clusters[i]['mean'], torch.Tensor)
-                    else torch.tensor(clusters[i]['mean'], dtype=torch.float32, device=device)
-                    for i in range(K)]
+    avg_features = torch.stack([
+        clusters[i]['mean'].to(device) if isinstance(clusters[i]['mean'], torch.Tensor)
+        else torch.tensor(clusters[i]['mean'], dtype=torch.float32, device=device)
+        for i in range(K)
+    ], dim=0)  # shape (K, F)
 
-    adj_matrix = torch.zeros((K, K), dtype=torch.uint8, device=device)
+    # Precompute pairwise feature distances
+    feature_dists = torch.cdist(
+        avg_features, avg_features, p=2)  # shape (K, K)
+    similarity_mask = feature_dists < similarity_threshold
+
+    adj_matrix = torch.zeros((K, K), dtype=torch.bool, device=device)
     neighbor_offsets = torch.tensor(
         [o for o in product([-1, 0, 1], repeat=3) if o != (0, 0, 0)],
         dtype=torch.int64,
         device=device
     )
 
-    def is_similar(c1, c2):
-        return torch.norm(avg_features[c1] - avg_features[c2], p=2) < similarity_threshold
     for idx, cluster_set in enumerate(voxel_clusters):
-        # Same voxel connections
-        for i in range(len(cluster_set)):
-            for j in range(i + 1, len(cluster_set)):
-                c1, c2 = cluster_set[i].item(), cluster_set[j].item()
-                if is_similar(c1, c2):
-                    adj_matrix[c1, c2] = 1
-                    adj_matrix[c2, c1] = 1
+        # Same voxel connections (vectorized)
+        if len(cluster_set) > 1:
+            cset = cluster_set.unsqueeze(0)
+            cset2 = cluster_set.unsqueeze(1)
+            mask = (
+                cset != cset2) & similarity_mask[cluster_set][:, cluster_set]
+            adj_matrix[cluster_set.unsqueeze(1), cluster_set] |= mask
 
         voxel_pos = voxel_coords[idx]
         neighbors = voxel_pos + neighbor_offsets
         for npos in neighbors:
-            mask = (voxel_coords == npos).all(dim=1)
-            if mask.any():
-                neighbor_idx = mask.nonzero(as_tuple=True)[0].item()
-                for c1 in cluster_set:
-                    for c2 in voxel_clusters[neighbor_idx]:
-                        if c1 != c2 and is_similar(c1.item(), c2.item()):
-                            adj_matrix[c1, c2] = 1
-                            adj_matrix[c2, c1] = 1
+            npos_tuple = tuple(npos.tolist())
+            neighbor_idx = voxel_coord_map.get(npos_tuple, None)
+            if neighbor_idx is not None:
+                c1s = cluster_set
+                c2s = voxel_clusters[neighbor_idx]
+                # Vectorized pairwise similarity for neighbor clusters
+                c1s_exp = c1s.unsqueeze(1)
+                c2s_exp = c2s.unsqueeze(0)
+                mask = (c1s_exp != c2s_exp) & similarity_mask[c1s][:, c2s]
+                adj_matrix[c1s_exp, c2s] |= mask
 
-    return adj_matrix
+    # Convert to uint8 for compatibility
+    return adj_matrix.to(torch.uint8)
 
 
 def connected_components(adj_matrix: torch.Tensor):
@@ -218,18 +230,19 @@ def create_clusters_iterative(ins_feats, gaussian_pos, num_iterations=5, num_ini
         num_init_clusters
     )
     new_labels, _ = create_clusters(
-        over_segmentated_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution)
+        over_segmentated_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution, verbose=verbose)
     if verbose:
         logging.info(
-            f"Initial clustering done with {new_labels.max().item() + 1} clusters.")
+            f"Initial clustering done with {int(new_labels.max().item() + 1)} clusters.")
     for iteration in range(num_iterations):
         similarity_threshold += 0.25
         if iteration % 2 == 0:
             resolution *= 2
         new_labels, _ = create_clusters(
-            new_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution)
+            new_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution, verbose=verbose)
         if verbose:
             logging.info(
                 f"Iteration {iteration + 1}: Clustering done with resolution {resolution} and similarity threshold {similarity_threshold}.")
-            logging.info(f"Number of clusters: {new_labels.max().item() + 1}")
+            logging.info(
+                f"Number of clusters: {int(new_labels.max().item() + 1)}")
     return new_labels

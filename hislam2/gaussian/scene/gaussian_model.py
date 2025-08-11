@@ -40,9 +40,10 @@ class GaussianModel:
         self._scaling = torch.empty(0, device="cuda")
         self._rotation = torch.empty(0, device="cuda")
         self._opacity = torch.empty(0, device="cuda")
-        self._ins_feat = torch.empty(0, device="cuda")     # Continuous instance features before quantization
+        self._ins_feat = torch.empty(0, device="cuda")
         self.max_radii2D = torch.empty(0, device="cuda")
         self.xyz_gradient_accum = torch.empty(0, device="cuda")
+        self.cluster_labels = torch.empty(0, device="cuda")
 
         self.unique_kfIDs = torch.empty(0).int()
         self.n_obs = torch.empty(0).int()
@@ -93,7 +94,7 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
     @property
     def get_ins_feat(self, origin=False):
         ins_feat = self._ins_feat
@@ -111,7 +112,8 @@ class GaussianModel:
 
     def create_pcd_from_image(self, cam_info, init=False, scale=2.0, depthmap=None):
         cam = cam_info
-        rgb_raw = (cam.original_image * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy()
+        rgb_raw = (cam.original_image * 255).byte().permute(1,
+                                                            2, 0).contiguous().cpu().numpy()
         rgb = o3d.geometry.Image(rgb_raw.astype(np.uint8))
         depth = o3d.geometry.Image(depthmap.astype(np.float32))
 
@@ -153,14 +155,18 @@ class GaussianModel:
         new_rgb = np.asarray(pcd_tmp.colors)
 
         pcd = BasicPointCloud(
-            points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
+            points=new_xyz, colors=new_rgb, normals=np.zeros(
+                (new_xyz.shape[0], 3))
         )
         self.ply_input = pcd
 
-        fused_point_cloud = torch.from_numpy(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.from_numpy(np.asarray(pcd.colors)).float().cuda())
+        fused_point_cloud = torch.from_numpy(
+            np.asarray(pcd.points)).float().cuda()
+        fused_color = RGB2SH(torch.from_numpy(
+            np.asarray(pcd.colors)).float().cuda())
         features = (
-            torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
+            torch.zeros(
+                (fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2))
             .float()
             .cuda()
         )
@@ -169,7 +175,8 @@ class GaussianModel:
 
         dist2 = (
             torch.clamp_min(
-                distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+                distCUDA2(torch.from_numpy(
+                    np.asarray(pcd.points)).float().cuda()),
                 0.0000001,
             )
             * point_size
@@ -186,7 +193,8 @@ class GaussianModel:
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
         )
-        ins_feat = torch.rand((fused_point_cloud.shape[0], 6), dtype=torch.float, device="cuda")
+        ins_feat = torch.rand(
+            (fused_point_cloud.shape[0], 6), dtype=torch.float, device="cuda")
 
         return fused_point_cloud, features, scales, rots, opacities, ins_feat
 
@@ -198,15 +206,17 @@ class GaussianModel:
     ):
         new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         new_features_dc = nn.Parameter(
-            features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True)
+            features[:, :, 0:1].transpose(
+                1, 2).contiguous().requires_grad_(True)
         )
         new_features_rest = nn.Parameter(
-            features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True)
+            features[:, :, 1:].transpose(
+                1, 2).contiguous().requires_grad_(True)
         )
         new_scaling = nn.Parameter(scales.requires_grad_(True))
         new_rotation = nn.Parameter(rots.requires_grad_(True))
         new_opacity = nn.Parameter(opacities.requires_grad_(True))
-        
+
         new_ins_feat = nn.Parameter(ins_feats.requires_grad_(True))
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
@@ -227,7 +237,8 @@ class GaussianModel:
         self, cam_info, kf_id=-1, init=False, scale=2.0, depthmap=None
     ):
         fused_point_cloud, features, scales, rots, opacities, ins_feat = (
-            self.create_pcd_from_image(cam_info, init, scale=scale, depthmap=depthmap)
+            self.create_pcd_from_image(
+                cam_info, init, scale=scale, depthmap=depthmap)
         )
         self.extend_from_pcd(
             fused_point_cloud, features, scales, rots, opacities, ins_feat, kf_id
@@ -235,7 +246,8 @@ class GaussianModel:
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum = torch.zeros(
+            (self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
@@ -342,32 +354,38 @@ class GaussianModel:
         ]
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate(
-            (xyz, normals, f_dc, f_rest, opacities, ins_feat, scale, rotation), axis=1
+            (xyz, normals, f_dc, f_rest, opacities,
+             ins_feat, scale, rotation), axis=1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 
     def reset_opacity(self):
-        opacities_new = inverse_sigmoid(torch.ones_like(self.get_opacity) * 0.01)
-        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        opacities_new = inverse_sigmoid(
+            torch.ones_like(self.get_opacity) * 0.01)
+        optimizable_tensors = self.replace_tensor_to_optimizer(
+            opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
     def reset_opacity_nonvisible(
         self, visibility_filters
-    ):  ##Reset opacity for only non-visible gaussians
-        opacities_new = inverse_sigmoid(torch.ones_like(self.get_opacity) * 0.4)
+    ):  # Reset opacity for only non-visible gaussians
+        opacities_new = inverse_sigmoid(
+            torch.ones_like(self.get_opacity) * 0.4)
 
         for filter in visibility_filters:
             opacities_new[filter] = self.get_opacity[filter]
-        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        optimizable_tensors = self.replace_tensor_to_optimizer(
+            opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["name"] == name:
-                stored_state = self.optimizer.state.get(group["params"][0], None)
+                stored_state = self.optimizer.state.get(
+                    group["params"][0], None)
                 stored_state["exp_avg"] = torch.zeros_like(tensor)
                 stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
@@ -430,7 +448,8 @@ class GaussianModel:
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
                 )
                 stored_state["exp_avg_sq"] = torch.cat(
-                    (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
+                    (stored_state["exp_avg_sq"],
+                     torch.zeros_like(extension_tensor)),
                     dim=0,
                 )
 
@@ -484,11 +503,13 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum = torch.zeros(
+            (self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         if new_kf_ids is not None:
-            self.unique_kfIDs = torch.cat((self.unique_kfIDs, new_kf_ids)).int()
+            self.unique_kfIDs = torch.cat(
+                (self.unique_kfIDs, new_kf_ids)).int()
         if new_n_obs is not None:
             self.n_obs = torch.cat((self.n_obs, new_n_obs)).int()
 
@@ -497,7 +518,8 @@ class GaussianModel:
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[: grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = torch.where(
+            padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values
@@ -507,7 +529,8 @@ class GaussianModel:
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
         samples = torch.normal(mean=means, std=stds)
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        rots = build_rotation(
+            self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
             selected_pts_mask
         ].repeat(N, 1)
@@ -516,7 +539,8 @@ class GaussianModel:
         )
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(
+            N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
         new_ins_feat = self._ins_feat[selected_pts_mask].repeat(N, 1)
 
@@ -538,7 +562,8 @@ class GaussianModel:
         prune_filter = torch.cat(
             (
                 selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
+                torch.zeros(N * selected_pts_mask.sum(),
+                            device="cuda", dtype=bool),
             )
         )
 
@@ -584,7 +609,8 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
-        prune_mask = torch.logical_and((self.get_opacity < min_opacity).squeeze(), (self.unique_kfIDs != self.unique_kfIDs.max()).cuda())
+        prune_mask = torch.logical_and((self.get_opacity < min_opacity).squeeze(
+        ), (self.unique_kfIDs != self.unique_kfIDs.max()).cuda())
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
@@ -632,7 +658,8 @@ class GaussianModel:
 
             # Sanity check
             if vertex_count == 0:
-                raise ValueError("Could not determine number of vertices from header.")
+                raise ValueError(
+                    "Could not determine number of vertices from header.")
 
             # Read binary data
             data = np.fromfile(f, dtype=dtype, count=vertex_count)
@@ -641,10 +668,13 @@ class GaussianModel:
         array_2d = np.vstack([data[field] for field in fields]).T
         print(f"Loaded {len(data)} vertices.")
         print(array_2d[0])
-        self._xyz = torch.Tensor(array_2d[:, :3])  # Extract position data (x, y, z)
+        # Extract position data (x, y, z)
+        self._xyz = torch.Tensor(array_2d[:, :3])
         normals = torch.Tensor(array_2d[:, 3:6])  # Extract normal data
-        self._features_dc = torch.Tensor(array_2d[:, 6:9])  # Extract spherical harmonics data
+        # Extract spherical harmonics data
+        self._features_dc = torch.Tensor(array_2d[:, 6:9])
         self._opacity = torch.Tensor(array_2d[:, 9])  # Extract opacity data
         self._ins_feat = torch.Tensor(array_2d[:, 10:16])
         self._scaling = torch.Tensor(array_2d[:, 16:19])  # Extract scale data
-        self._rotation = torch.Tensor(array_2d[:, 19:23])  # Extract rotation data
+        self._rotation = torch.Tensor(
+            array_2d[:, 19:23])  # Extract rotation data
