@@ -1,3 +1,4 @@
+import colorsys
 import os
 import random
 import time
@@ -235,7 +236,7 @@ class GSBackEnd(mp.Process):
             )
             loss_init = get_loss_mapping_rgbd(
                 self.config, image, depth, viewpoint)
-            if self.iteration_count > self.optimize_ins_feats_step:
+            if self.iteration_count > self.optimize_ins_feats_step and self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
                 sam_masks = read_masks(
                     viewpoint.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
                 feature_mean = mask_feature_mean(ins_feat, sam_masks)
@@ -251,7 +252,7 @@ class GSBackEnd(mp.Process):
             if self.writer:
                 self.writer.add_scalar(
                     'InitLoss/loss_init', loss_init.item(), self.iteration_count)
-                if self.iteration_count > self.optimize_ins_feats_step:
+                if self.iteration_count > self.optimize_ins_feats_step and self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
                     self.writer.add_scalar(
                         'InitLoss/separation_loss', s_loss.item(), self.iteration_count)
                     self.writer.add_scalar(
@@ -329,26 +330,32 @@ class GSBackEnd(mp.Process):
                 rgbd_loss = get_loss_mapping_rgbd(
                     self.config, image, depth, viewpoint)
                 loss_mapping += rgbd_loss
-                sam_masks = read_masks(
-                    viewpoint.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
-                feature_mean = mask_feature_mean(ins_feat, sam_masks)
-                s_loss = separation_loss(feature_mean)
-                c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
-                loss_mapping += self.opt_params.lambda_cohesion * c_loss + s_loss
-                r_loss = kl_regularization_loss(
-                    self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
-                loss_mapping += r_loss
+                semantic_loss = 0
+                if self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
+                    sam_masks = read_masks(
+                        viewpoint.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
+                    feature_mean = mask_feature_mean(ins_feat, sam_masks)
+                    s_loss = separation_loss(feature_mean)
+                    c_loss = cohesion_loss(sam_masks, ins_feat, feature_mean)
+                    semantic_loss += self.opt_params.lambda_cohesion * c_loss + s_loss
+                    r_loss = kl_regularization_loss(
+                        self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
+                    semantic_loss += r_loss
+                    loss_mapping += semantic_loss
                 if self.writer:
                     self.writer.add_scalar(
                         'Loss/normal_loss', normal_loss.item(), self.iteration_count)
                     self.writer.add_scalar(
                         'Loss/rgbd_loss', rgbd_loss.item(), self.iteration_count)
-                    self.writer.add_scalar(
-                        'Loss/separation_loss', s_loss.item(), self.iteration_count)
-                    self.writer.add_scalar(
-                        'Loss/kl_regularization_loss', r_loss.item(), self.iteration_count)
-                    self.writer.add_scalar(
-                        'Loss/cohesion_loss', c_loss.item(), self.iteration_count)
+                    if self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
+                        self.writer.add_scalar(
+                            'Loss/separation_loss', s_loss.item(), self.iteration_count)
+                        self.writer.add_scalar(
+                            'Loss/kl_regularization_loss', r_loss.item(), self.iteration_count)
+                        self.writer.add_scalar(
+                            'Loss/cohesion_loss', c_loss.item(), self.iteration_count)
+                        self.writer.add_scalar(
+                            'Loss/semantic_loss', semantic_loss.item(), self.iteration_count)
                     if self.iteration_count % 100 == 0:
                         self.log_instance_feates(
                             'Loss/PCA_RGB_Image', ins_feat, self.iteration_count)
@@ -362,10 +369,10 @@ class GSBackEnd(mp.Process):
             scaling = self.gaussians.get_scaling
             isotropic_loss = torch.abs(
                 scaling - scaling.mean(dim=1).view(-1, 1))
-            loss_mapping += 10 * isotropic_loss.mean()
             if self.writer:
                 self.writer.add_scalar(
-                    'Loss/loss_mapping', loss_mapping.mean().item(), self.iteration_count)
+                    'Loss/isotropic_loss', isotropic_loss.mean().item(), self.iteration_count)
+            loss_mapping += 10 * isotropic_loss.mean()
             loss_mapping.backward()
             # Log loss to TensorBoard
             # Deinsifying / Pruning Gaussians
@@ -433,24 +440,26 @@ class GSBackEnd(mp.Process):
             image, depth, ins_feat = render_pkg["render"], render_pkg["depth"], render_pkg["rendered_features"]
             image = (torch.exp(viewpoint_cam.exposure_a)) * \
                 image + viewpoint_cam.exposure_b
-            sam_masks = read_masks(
-                viewpoint_cam.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
-            semantic_masks = read_masks(
-                viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
-            feature_mean = mask_feature_mean(ins_feat, sam_masks)
-            s_loss = separation_loss(feature_mean)
-            semantic_feature_mean = mask_feature_mean(
-                ins_feat, semantic_masks)
-            c_loss = cohesion_loss(
-                semantic_masks, ins_feat, semantic_feature_mean)
-            r_loss = kl_regularization_loss(
-                self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
+            if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
+                sam_masks = read_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["sam_mask_dir"]).cuda()
+                semantic_masks = read_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+                feature_mean = mask_feature_mean(ins_feat, sam_masks)
+                s_loss = separation_loss(feature_mean)
+                semantic_feature_mean = mask_feature_mean(
+                    ins_feat, semantic_masks)
+                c_loss = cohesion_loss(
+                    semantic_masks, ins_feat, semantic_feature_mean)
+                r_loss = kl_regularization_loss(
+                    self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
             gt_image = viewpoint_cam.original_image.cuda()
             l1_loss_color = l1_loss(image, gt_image)
             ssim_loss = (1.0 - ssim(image, gt_image))
             loss = (1.0 - self.opt_params.lambda_dssim) * l1_loss_color + \
                 self.opt_params.lambda_dssim * ssim_loss
-            loss += s_loss + c_loss * self.opt_params.lambda_cohesion + r_loss
+            if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
+                loss += s_loss + c_loss * self.opt_params.lambda_cohesion + r_loss
             rgb_mapping_loss = get_loss_mapping_rgbd(
                 self.config, image, depth, viewpoint_cam)
             loss += rgb_mapping_loss
@@ -461,12 +470,13 @@ class GSBackEnd(mp.Process):
                     'Refinement_Loss/l1_loss', l1_loss_color.item(), iteration)
                 self.writer.add_scalar(
                     'Refinement_Loss/ssim_loss', ssim_loss.item(), iteration)
-                self.writer.add_scalar(
-                    'Refinement_Loss/separation_loss', s_loss.item(), iteration)
-                self.writer.add_scalar(
-                    'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration)
-                self.writer.add_scalar(
-                    'Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
+                if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
+                    self.writer.add_scalar(
+                        'Refinement_Loss/separation_loss', s_loss.item(), iteration)
+                    self.writer.add_scalar(
+                        'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration)
+                    self.writer.add_scalar(
+                        'Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
                 self.writer.add_scalar(
                     'Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration)
                 if iteration % 100 == 0:
@@ -498,27 +508,60 @@ class GSBackEnd(mp.Process):
             pbar.set_description(
                 f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
 
-        self.gaussians.cluster_labels = create_clusters_iterative(self.gaussians.get_ins_feat, self.gaussians.get_xyz,
-                                                                  num_iterations=5, num_init_clusters=128, verbose=True).device(self.gaussians.get_ins_feat.device)
+        with torch.no_grad():
+            self.gaussians.cluster_labels, merged_clusters = create_clusters_iterative(self.gaussians.get_ins_feat, self.gaussians.get_xyz,
+                                                                                       num_iterations=2, num_init_clusters=48, verbose=True)
+            self.gaussians.cluster_labels = self.gaussians.cluster_labels.to(
+                self.gaussians.get_ins_feat.device)
+        K = len(merged_clusters)  # number of clusters
+        # Build color map (list of [3] tensors with values 0–255)
+        color_map = self.distinct_colors(K)
+        color_map = torch.stack(color_map, dim=0).to(
+            self.gaussians.get_ins_feat.device)  # [K, 3]
+        cluster_features = torch.stack([
+            d['avg_feature'].view(-1) for d in merged_clusters
+        ], dim=0)  # [K, 6]
+        print([d['avg_feature'].shape for d in merged_clusters][:5])
+        if self.writer:
+            unique_labels = self.gaussians.cluster_labels.unique()
+            viewpoint_idx_stack = list(self.viewpoints.keys())
+            for vp_idx in range(10):
+                viewpoint_cam_idx = viewpoint_idx_stack.pop(
+                    random.randint(0, len(viewpoint_idx_stack) - 1))
+                viewpoint_cam = self.viewpoints[viewpoint_cam_idx]
+                render_features = render(viewpoint_cam, self.gaussians,
+                                         self.background, self.empty_ins_feats)["rendered_features"]
+                W, H = render_features.shape[1], render_features.shape[2]
+                flat_features = render_features.permute(
+                    1, 2, 0).reshape(-1, 6)  # [W*H, 6]
+                dists = torch.cdist(
+                    flat_features, cluster_features)  # [W*H, K]
+                closest_clusters = torch.argmin(dists, dim=1)  # [W*H]
+                assignments = closest_clusters.view(W, H).to(
+                    self.gaussians.get_ins_feat.device)  # [W, H]
+                flat_assignments = assignments.reshape(-1)  # [W*H]
+                seg_colors = color_map[flat_assignments]  # [W*H, 3]
+                seg_colors = seg_colors.view(W, H, 3)
+                segmentation_assignment = seg_colors.permute(
+                    2, 0, 1)  # [3, W, H]
+                self.log_rgb_images('Final_seg',
+                                    segmentation_assignment, vp_idx)
 
         Log("Map refinement done")
         if self.writer:
-            self.writer.add_scalar(
-                'Refinement_Loss/color_refinement', loss.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/l1_loss', l1_loss_color.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/ssim_loss', ssim_loss.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/separation_loss', s_loss.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/cohesion_loss', c_loss.item(), iteration_total+2)
-            self.writer.add_scalar(
-                'Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration_total+2)
             self.log_instance_feates(
                 'Refinement_Loss/PCA_RGB_Image', ins_feat, iteration_total+2)
             self.log_rgb_images('Refinement_Loss/RGB_Image',
                                 image, iteration_total+2)
             self.writer.close()
+
+    def distinct_colors(self, K):
+        color_map = []
+        for i in range(K):
+            h = i / K
+            # alternate between high/low saturation
+            s = 0.6 + 0.4 * ((i % 2))
+            v = 0.7 + 0.3 * ((i // 2) % 2)  # alternate brightness
+            rgb = [int(x * 255) for x in colorsys.hsv_to_rgb(h, s, v)]
+            color_map.append(torch.tensor(rgb, dtype=torch.uint8))
+        return color_map

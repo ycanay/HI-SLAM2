@@ -41,7 +41,7 @@ Training:
   rgb_boundary_threshold: 0.01
   lambda_dnormal: 0.1
   compensate_exposure: false
-  optimize_ins_feats_step: 750
+  optimize_ins_feats_step: 0
 
 opt_params:
   iteration_per_scene: 10
@@ -51,13 +51,14 @@ opt_params:
   position_lr_max_steps: 2000
   feature_lr: 0.0025
   opacity_lr: 0.05
-  ins_feature_lr: 0.002
+  ins_feature_lr: 0.05
   scaling_lr: 0.001
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
   lambda_cohesion: 0.05
+  ins_feat_optimization_per_step: 5
 masks:
-  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks_parts"
+  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/instance_segmentation"
   semantic_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/semantic_segmentation"

@@ -186,8 +186,7 @@ def merge_clusters_by_components(clusters, components, ins_feats):
     for comp in components:
         merged_indices = torch.cat(
             [clusters[i]['indices'] for i in comp], dim=0)
-        merged_features = torch.cat(
-            [clusters[i]['mean'] for i in comp], dim=0)
+        merged_features = ins_feats[merged_indices]
         merged_clusters.append({
             'indices': merged_indices,
             'avg_feature': merged_features.mean(dim=0)
@@ -229,7 +228,7 @@ def create_clusters_iterative(ins_feats, gaussian_pos, num_iterations=5, num_ini
         normalized_ins_feats,
         num_init_clusters
     )
-    new_labels, _ = create_clusters(
+    new_labels, merged_clusters = create_clusters(
         over_segmentated_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution, verbose=verbose)
     if verbose:
         logging.info(
@@ -238,11 +237,11 @@ def create_clusters_iterative(ins_feats, gaussian_pos, num_iterations=5, num_ini
         similarity_threshold += 0.25
         if iteration % 2 == 0:
             resolution *= 2
-        new_labels, _ = create_clusters(
+        new_labels, merged_clusters = create_clusters(
             new_labels, normalized_ins_feats, gaussian_pos, similarity_threshold, resolution, verbose=verbose)
         if verbose:
             logging.info(
                 f"Iteration {iteration + 1}: Clustering done with resolution {resolution} and similarity threshold {similarity_threshold}.")
             logging.info(
                 f"Number of clusters: {int(new_labels.max().item() + 1)}")
-    return new_labels
+    return new_labels, merged_clusters

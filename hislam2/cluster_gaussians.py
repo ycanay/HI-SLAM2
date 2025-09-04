@@ -61,16 +61,15 @@ def over_segmentation(gaussians: torch.Tensor, features: torch.Tensor, num_clust
     assert features.shape[1] == 6, "features must have at least one dimension."
     assert gaussians.shape[0] >= num_clusters, "num_clusters must be less than or equal to the number of gaussians."
 
-    positional_encodings = gaussians.cpu()
-    concat_vector = torch.cat((positional_encodings, features), dim=1)
+    concat_vector = torch.cat((gaussians, features), dim=1)
     concat_vector = concat_vector - concat_vector.mean(dim=0, keepdim=True)
     concat_vector = concat_vector / \
         (concat_vector.std(dim=0, keepdim=True) + 1e-6)
     cluster_centers, cluster_indexes = torch_fpsample.sample(
-        concat_vector, num_clusters)
+        concat_vector.cpu(), num_clusters)
     kmeans = KMeans(n_clusters=num_clusters, init=cluster_centers)
     kmeans.fit(concat_vector.cpu().numpy())
-    return torch.Tensor(kmeans.labels_)
+    return torch.Tensor(kmeans.labels_).cuda()
 
 
 def positional_encoding_3d_batch(coords: torch.Tensor, dim_total: int = 3) -> torch.Tensor:
