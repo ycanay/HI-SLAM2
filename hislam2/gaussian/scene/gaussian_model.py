@@ -18,15 +18,15 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
 
-from gaussian.utils.general_utils import (
+from hislam2.gaussian.utils.general_utils import (
     build_rotation,
     build_scaling_rotation,
     helper,
     inverse_sigmoid,
     strip_symmetric,
 )
-from gaussian.utils.graphics_utils import BasicPointCloud, getWorld2View2
-from gaussian.utils.sh_utils import RGB2SH
+from hislam2.gaussian.utils.graphics_utils import BasicPointCloud, getWorld2View2
+from hislam2.gaussian.utils.sh_utils import RGB2SH
 
 
 class GaussianModel:
@@ -48,7 +48,7 @@ class GaussianModel:
         self.unique_kfIDs = torch.empty(0).int()
         self.n_obs = torch.empty(0).int()
 
-        self.optimizer = None
+        self.optimizer: torch.optim.Optimizer = None
 
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
@@ -221,6 +221,8 @@ class GaussianModel:
 
         new_unique_kfIDs = torch.ones((new_xyz.shape[0])).int() * kf_id
         new_n_obs = torch.zeros((new_xyz.shape[0])).int()
+        if new_xyz.shape[0] == 0:
+            return
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -441,34 +443,53 @@ class GaussianModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
+            old_param = group["params"][0]
             extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group["params"][0], None)
+            if extension_tensor.shape[0] == 0:
+                optimizable_tensors[group["name"]] = old_param
+                continue
+
+            stored_state = self.optimizer.state.get(old_param, None)
+
             if stored_state is not None:
+                # Make sure extension matches state device/dtype
+                device = stored_state["exp_avg"].device
+                dtype = stored_state["exp_avg"].dtype
+
+                extension_tensor = extension_tensor.to(
+                    device=device, dtype=dtype)
+
                 stored_state["exp_avg"] = torch.cat(
-                    (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
+                    [stored_state["exp_avg"],
+                     torch.zeros_like(extension_tensor)], dim=0
                 )
                 stored_state["exp_avg_sq"] = torch.cat(
-                    (stored_state["exp_avg_sq"],
-                     torch.zeros_like(extension_tensor)),
-                    dim=0,
+                    [stored_state["exp_avg_sq"],
+                     torch.zeros_like(extension_tensor)], dim=0
                 )
 
-                del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
+                # Build new param on the SAME device/dtype
+                new_param = torch.cat(
+                    [old_param.to(device=device, dtype=dtype),
+                     extension_tensor], dim=0
+                ).requires_grad_(True)
+
+                del self.optimizer.state[old_param]
+                group["params"][0] = nn.Parameter(new_param)
                 self.optimizer.state[group["params"][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
             else:
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
-                optimizable_tensors[group["name"]] = group["params"][0]
+                # Fresh param creation (no stored state yet)
+                device = old_param.device
+                dtype = old_param.dtype
+
+                extension_tensor = extension_tensor.to(
+                    device=device, dtype=dtype)
+                new_param = torch.cat(
+                    [old_param, extension_tensor], dim=0).requires_grad_(True)
+                group["params"][0] = nn.Parameter(new_param)
+
+            optimizable_tensors[group["name"]] = group["params"][0]
 
         return optimizable_tensors
 
@@ -503,10 +524,18 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros(
-            (self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        if self.get_xyz.shape[0] != 0:
+            self.xyz_gradient_accum = torch.zeros(
+                (self.get_xyz.shape[0], 1), device="cuda")
+            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.max_radii2D = torch.zeros(
+                (self.get_xyz.shape[0]), device="cuda")
+        else:
+            self.xyz_gradient_accum = torch.zeros(
+                (1, 1), device="cuda")
+            self.denom = torch.zeros((1, 1), device="cuda")
+            self.max_radii2D = torch.zeros(
+                (1), device="cuda")
         if new_kf_ids is not None:
             self.unique_kfIDs = torch.cat(
                 (self.unique_kfIDs, new_kf_ids)).int()

@@ -26,7 +26,7 @@ Tracking:
     pgba_thresh: 22.0 # add loop closure edges within this distance (larger is more edges)')
 
 Training:
-  init_itr_num: 1050
+  init_itr_num: 1000
   init_gaussian_update: 100
   init_gaussian_reset: 550
   init_gaussian_th: 0.005
@@ -51,14 +51,15 @@ opt_params:
   position_lr_max_steps: 2000
   feature_lr: 0.0025
   opacity_lr: 0.05
-  ins_feature_lr: 0.05
+  ins_feature_lr: 0.01
   scaling_lr: 0.001
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.05
+  lambda_cohesion: 0.02
   ins_feat_optimization_per_step: 5
 masks:
-  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/instance_segmentation"
-  semantic_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/semantic_segmentation"
+  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/component_segmentation/"
+  semantic_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks_parts"
+  network: "facebook/mask2former-swin-large-ade-semantic"

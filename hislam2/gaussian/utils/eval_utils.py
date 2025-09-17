@@ -6,10 +6,10 @@ import numpy as np
 import torch
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from util.utils import Log
-from gaussian.renderer import render
-from gaussian.utils.loss_utils import ssim, psnr
-from gaussian.utils.camera_utils import Camera
+from hislam2.util.utils import Log
+from hislam2.gaussian.renderer import render
+from hislam2.gaussian.utils.loss_utils import ssim, psnr
+from hislam2.gaussian.utils.camera_utils import Camera
 
 
 def eval_rendering(
@@ -25,23 +25,26 @@ def eval_rendering(
     kf_idx,
     iteration="final",
 ):
-    gtdepths = sorted(os.listdir(gtdepthdir)) if gtdepthdir is not None else None
+    gtdepths = sorted(os.listdir(gtdepthdir)
+                      ) if gtdepthdir is not None else None
     psnr_array, ssim_array, lpips_array, l1_array = [], [], [], []
-    cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
-    
+    cal_lpips = LearnedPerceptualImagePatchSimilarity(
+        net_type="alex", normalize=True).to("cuda")
+
     image_save_dir = f'{save_dir}/renders/image_{iteration}'
     ins_feat_save_dir = f'{save_dir}/renders/ins_feat_{iteration}'
     depth_save_dir = f'{save_dir}/renders/depth_{iteration}'
-    # vis_save_dir = f'{save_dir}/renders/vis_{iteration}'  
+    # vis_save_dir = f'{save_dir}/renders/vis_{iteration}'
     os.makedirs(image_save_dir, exist_ok=True)
     os.makedirs(ins_feat_save_dir, exist_ok=True)
     os.makedirs(depth_save_dir, exist_ok=True)
     # os.makedirs(vis_save_dir, exist_ok=True)
-    
+
     for i, (idx, image) in enumerate(gtimages.items()):
         if idx % 5 != 0 and idx not in kf_idx and i != len(gtimages) - 1:
             continue
-        frame = Camera.init_from_tracking(image.squeeze()/255.0, None, None, traj[idx], idx, projection_matrix, K)
+        frame = Camera.init_from_tracking(
+            image.squeeze()/255.0, None, None, traj[idx], idx, projection_matrix, K)
         gtimage = frame.original_image.cuda()
 
         rendering = render(frame, gaussians, background, empty_ins_feats)
@@ -52,31 +55,40 @@ def eval_rendering(
         depth = rendering["depth"].detach().squeeze().cpu().numpy()
 
         if gtdepthdir is not None:
-            gtdepth = cv2.imread(os.path.join(gtdepthdir, gtdepths[idx]), cv2.IMREAD_ANYDEPTH) / 6553.5 # 1000.
-            gtdepth = cv2.resize(gtdepth, (depth.shape[-1], depth.shape[-2]), interpolation=cv2.INTER_NEAREST)
+            # 1000.
+            gtdepth = cv2.imread(os.path.join(
+                gtdepthdir, gtdepths[idx]), cv2.IMREAD_ANYDEPTH) / 6553.5
+            gtdepth = cv2.resize(
+                gtdepth, (depth.shape[-1], depth.shape[-2]), interpolation=cv2.INTER_NEAREST)
             invalid = gtdepth <= 0
             depth[invalid] = 0
 
-        pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        pred = (image.detach().cpu().numpy().transpose(
+            (1, 2, 0)) * 255).astype(np.uint8)
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
-        pred_feat_1 = (ins_feat_1.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
-        pred_feat_2 = (ins_feat_2.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
+        pred_feat_1 = (ins_feat_1.detach().cpu().numpy(
+        ).transpose((1, 2, 0)) * 255).astype(np.uint8)
+        pred_feat_2 = (ins_feat_2.detach().cpu().numpy(
+        ).transpose((1, 2, 0)) * 255).astype(np.uint8)
         pred_feat_1 = cv2.cvtColor(pred_feat_1, cv2.COLOR_BGR2RGB)
         pred_feat_2 = cv2.cvtColor(pred_feat_2, cv2.COLOR_BGR2RGB)
         cv2.imwrite(f'{image_save_dir}/{idx:06d}.jpg', pred)
-        cv2.imwrite(f'{depth_save_dir}/{idx:06d}.png', np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
+        cv2.imwrite(f'{depth_save_dir}/{idx:06d}.png',
+                    np.clip(depth*6553.5, 0, 65535).astype(np.uint16))
         cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_1.png', pred_feat_1)
         cv2.imwrite(f'{ins_feat_save_dir}/{idx:06d}_2.png', pred_feat_2)
         # vis = np.concatenate((pred, cv2.imread(f'{save_dir}/renders/depth_{iteration}/{idx:06d}.png')), axis=0)
         # cv2.imwrite(f'{vis_save_dir}/{idx:06d}.jpg', vis)
 
         if gtdepthdir is not None and idx in kf_idx:
-            l1_array.append(np.abs(gtdepth[depth > 0] - depth[depth > 0]).mean().item()) 
+            l1_array.append(
+                np.abs(gtdepth[depth > 0] - depth[depth > 0]).mean().item())
 
         # if idx in kf_idx:
         #     continue
         mask = gtimage > 0
-        psnr_score = psnr((image[mask]).unsqueeze(0), (gtimage[mask]).unsqueeze(0))
+        psnr_score = psnr((image[mask]).unsqueeze(0),
+                          (gtimage[mask]).unsqueeze(0))
         ssim_score = ssim((image).unsqueeze(0), (gtimage).unsqueeze(0))
         lpips_score = cal_lpips((image).unsqueeze(0), (gtimage).unsqueeze(0))
 
@@ -97,10 +109,12 @@ def eval_rendering(
 
     json.dump(
         output,
-        open(os.path.join(psnr_save_dir, "final_result.json"), "w", encoding="utf-8"),
+        open(os.path.join(psnr_save_dir, "final_result.json"),
+             "w", encoding="utf-8"),
         indent=4,
     )
     return output
+
 
 def eval_rendering_kf(
     viewpoints,
@@ -111,16 +125,19 @@ def eval_rendering_kf(
     iteration="final",
 ):
     psnr_array, ssim_array, lpips_array = [], [], []
-    cal_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to("cuda")
+    cal_lpips = LearnedPerceptualImagePatchSimilarity(
+        net_type="alex", normalize=True).to("cuda")
     for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
         rendering = render(frame, gaussians, background, empty_ins_feats)
-        image = (torch.exp(frame.exposure_a)) * rendering["render"] + frame.exposure_b
+        image = (torch.exp(frame.exposure_a)) * \
+            rendering["render"] + frame.exposure_b
         image = torch.clamp(image, 0.0, 1.0)
 
         mask = gtimage > 0
-        psnr_score = psnr((image[mask]).unsqueeze(0), (gtimage[mask]).unsqueeze(0))
+        psnr_score = psnr((image[mask]).unsqueeze(0),
+                          (gtimage[mask]).unsqueeze(0))
         ssim_score = ssim((image).unsqueeze(0), (gtimage).unsqueeze(0))
         lpips_score = cal_lpips((image).unsqueeze(0), (gtimage).unsqueeze(0))
 
@@ -140,10 +157,12 @@ def eval_rendering_kf(
 
     json.dump(
         output,
-        open(os.path.join(psnr_save_dir, "final_result_kf.json"), "w", encoding="utf-8"),
+        open(os.path.join(psnr_save_dir, "final_result_kf.json"),
+             "w", encoding="utf-8"),
         indent=4,
     )
     return output
+
 
 def save_gaussians(gaussians, name, iteration, final=False):
     if name is None:

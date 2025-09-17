@@ -4,16 +4,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
 
-from modules.extractor import BasicEncoder
-from modules.corr import CorrBlock
-from modules.gru import ConvGRU
-from modules.clipping import GradientClip
+from hislam2.modules.extractor import BasicEncoder
+from hislam2.modules.corr import CorrBlock
+from hislam2.modules.gru import ConvGRU
+from hislam2.modules.clipping import GradientClip
 
 from lietorch import SE3
-from geom.ba import BA
+from hislam2.geom.ba import BA
 
-import geom.projective_ops as pops
-from geom.graph_utils import graph_to_edge_list, keyframe_indicies
+import hislam2.geom.projective_ops as pops
+from hislam2.geom.graph_utils import graph_to_edge_list, keyframe_indicies
 
 from torch_scatter import scatter_mean
 
@@ -24,11 +24,13 @@ def cvx_upsample(data, mask):
     data = data.permute(0, 3, 1, 2)
     mask = mask.view(batch, 1, 9, 8, 8, ht, wd)
     # Set all borders to 0, so we do cvx combination of valid pixels only, otw you'll do cvx combinations of 0-valued pixels, which neither for depth nor covariance is valid...
-    mask[:, :, [[0,1,2], [6,7,8]], :, :, [[0],[-1]], :] = -torch.inf # for the top of img (first row, all cols)
-    mask[:, :, [[0,3,6], [2,5,8]], :, :, :, [[0],[-1]]] = -torch.inf # for the top of img (first row, all cols)
+    mask[:, :, [[0, 1, 2], [6, 7, 8]], :, :, [[0], [-1]], :] = - \
+        torch.inf  # for the top of img (first row, all cols)
+    mask[:, :, [[0, 3, 6], [2, 5, 8]], :, :, :, [[0], [-1]]] = - \
+        torch.inf  # for the top of img (first row, all cols)
     mask = torch.softmax(mask, dim=2)
 
-    up_data = F.unfold(data, [3,3], padding=1)
+    up_data = F.unfold(data, [3, 3], padding=1)
     up_data = up_data.view(batch, dim, 9, 1, 1, ht, wd)
 
     up_data = torch.sum(mask * up_data, dim=2)
@@ -36,6 +38,7 @@ def cvx_upsample(data, mask):
     up_data = up_data.reshape(batch, 8*ht, 8*wd, dim)
 
     return up_data
+
 
 def upsample_disp(disp, mask):
     batch, num, ht, wd = disp.shape
@@ -121,7 +124,7 @@ class UpdateModule(nn.Module):
 
         output_dim = (batch, num, -1, ht, wd)
         net = net.view(batch*num, -1, ht, wd)
-        inp = inp.view(batch*num, -1, ht, wd)        
+        inp = inp.view(batch*num, -1, ht, wd)
         corr = corr.view(batch*num, -1, ht, wd)
         flow = flow.view(batch*num, -1, ht, wd)
 
@@ -133,8 +136,8 @@ class UpdateModule(nn.Module):
         delta = self.delta(net).view(*output_dim)
         weight = self.weight(net).view(*output_dim)
 
-        delta = delta.permute(0,1,3,4,2)[...,:2].contiguous()
-        weight = weight.permute(0,1,3,4,2)[...,:2].contiguous()
+        delta = delta.permute(0, 1, 3, 4, 2)[..., :2].contiguous()
+        weight = weight.permute(0, 1, 3, 4, 2)[..., :2].contiguous()
 
         net = net.view(*output_dim)
 
@@ -153,7 +156,6 @@ class DroidNet(nn.Module):
         self.cnet = BasicEncoder(output_dim=256, norm_fn='none')
         self.update = UpdateModule()
 
-
     def extract_features(self, images):
         """ run feeature extraction networks """
 
@@ -165,12 +167,11 @@ class DroidNet(nn.Module):
 
         fmaps = self.fnet(images)
         net = self.cnet(images)
-        
-        net, inp = net.split([128,128], dim=2)
+
+        net, inp = net.split([128, 128], dim=2)
         net = torch.tanh(net)
         inp = torch.relu(inp)
         return fmaps, net, inp
-
 
     def forward(self, Gs, images, disps, intrinsics, graph=None, num_steps=12, fixedp=2):
         """ Estimates SE3 or Sim3 between pair of frames """
@@ -182,12 +183,12 @@ class DroidNet(nn.Module):
         jj = jj.to(device=images.device, dtype=torch.long)
 
         fmaps, net, inp = self.extract_features(images)
-        net, inp = net[:,ii], inp[:,ii]
-        corr_fn = CorrBlock(fmaps[:,ii], fmaps[:,jj], num_levels=4, radius=3)
+        net, inp = net[:, ii], inp[:, ii]
+        corr_fn = CorrBlock(fmaps[:, ii], fmaps[:, jj], num_levels=4, radius=3)
 
         ht, wd = images.shape[-2:]
         coords0 = pops.coords_grid(ht//8, wd//8, device=images.device)
-        
+
         coords1, _ = pops.projective_transform(Gs, disps, intrinsics, ii, jj)
         target = coords1.clone()
 
@@ -204,7 +205,7 @@ class DroidNet(nn.Module):
             flow = coords1 - coords0
 
             motion = torch.cat([flow, resd], dim=-1)
-            motion = motion.permute(0,1,4,2,3).clamp(-64.0, 64.0)
+            motion = motion.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
             net, delta, weight, eta, upmask = \
                 self.update(net, inp, corr, motion, ii, jj)
@@ -212,14 +213,15 @@ class DroidNet(nn.Module):
             target = coords1 + delta
 
             for i in range(2):
-                Gs, disps = BA(target, weight, eta, Gs, disps, intrinsics, ii, jj, fixedp=2)
+                Gs, disps = BA(target, weight, eta, Gs, disps,
+                               intrinsics, ii, jj, fixedp=2)
 
-            coords1, valid_mask = pops.projective_transform(Gs, disps, intrinsics, ii, jj)
+            coords1, valid_mask = pops.projective_transform(
+                Gs, disps, intrinsics, ii, jj)
             residual = (target - coords1)
 
             Gs_list.append(Gs)
             disp_list.append(upsample_disp(disps, upmask))
             residual_list.append(valid_mask * residual)
-
 
         return Gs_list, disp_list, residual_list

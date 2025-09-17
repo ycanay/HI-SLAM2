@@ -12,10 +12,10 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from gaussian.scene.gaussian_model import GaussianModel
+from hislam2.gaussian.scene.gaussian_model import GaussianModel
 
 
-def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_ins_feats: torch.Tensor, scaling_modifier=1.0, indices=None):
+def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_ins_feats: torch.Tensor, scaling_modifier=1.0):
     """
     Render the scene.
 
@@ -25,9 +25,6 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-    if indices is None:
-        indices = torch.arange(
-            pc.get_xyz.shape[0], device=pc.get_xyz.device, dtype=torch.long)
     screenspace_points = torch.zeros_like(
         pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
@@ -53,21 +50,21 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz[indices]
+    means3D = pc.get_xyz
     means2D = screenspace_points
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
     cov3D_precomp = None
-    scales = pc.get_scaling[indices]
-    opacity = pc.get_opacity[indices]
-    rotations = pc.get_rotation[indices]
+    scales = pc.get_scaling
+    opacity = pc.get_opacity
+    rotations = pc.get_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
-    shs = pc.get_features[indices]
+    shs = pc.get_features
     colors_precomp = None
-    ins_feat = pc.get_ins_feat[indices]
+    ins_feat = pc.get_ins_feat
     rendered_image, rendered_features, radii, rendered_expected_depth, alpha = rasterizer(
         means3D=means3D,
         means2D=means2D,

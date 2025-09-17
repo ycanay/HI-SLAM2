@@ -5,7 +5,7 @@ import numpy as np
 import open3d as o3d
 import torch
 
-from gaussian.utils.general_utils import (
+from hislam2.gaussian.utils.general_utils import (
     build_scaling_rotation,
     strip_symmetric,
 )
@@ -33,7 +33,8 @@ class Frustum:
         eye = cameraeye[0, :]
 
         base_behind = np.array([[0.0, -2.5, -100.0*behind]]) * self.size
-        base_behind_hmg = np.hstack([base_behind, np.ones((base_behind.shape[0], 1))])
+        base_behind_hmg = np.hstack(
+            [base_behind, np.ones((base_behind.shape[0], 1))])
         cameraeye_behind = pose @ base_behind_hmg.transpose()
         cameraeye_behind = cameraeye_behind[0:3, :].transpose()
         eye_behind = cameraeye_behind[0, :]

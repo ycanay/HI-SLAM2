@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from gaussian.utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
+from hislam2.gaussian.utils.graphics_utils import getProjectionMatrix2, getWorld2View2, focal2fov
 
 
 class Camera(nn.Module):
@@ -82,7 +82,7 @@ class Camera(nn.Module):
         cam.T = pose[:3, 3]
         cam.tstamp = tstamp
         return cam
-    
+
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
         gt_color, gt_depth, gt_pose = dataset[idx]

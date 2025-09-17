@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
-from util.utils import ele_multip_in_chunks
+from hislam2.util.utils import ele_multip_in_chunks
 
 
 def mse(img1, img2):
@@ -61,7 +61,8 @@ def gaussian(window_size, sigma):
 
 def create_window(window_size, channel):
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
-    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    _2D_window = _1D_window.mm(
+        _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
     window = Variable(
         _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     )
@@ -88,10 +89,12 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     mu1_mu2 = mu1 * mu2
 
     sigma1_sq = (
-        F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+        F.conv2d(img1 * img1, window, padding=window_size //
+                 2, groups=channel) - mu1_sq
     )
     sigma2_sq = (
-        F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+        F.conv2d(img2 * img2, window, padding=window_size //
+                 2, groups=channel) - mu2_sq
     )
     sigma12 = (
         F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
@@ -110,6 +113,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     else:
         return ssim_map.mean(1).mean(1).mean(1)
 
+
 def separation_loss(feat_mean_stack):
     """ inter-mask contrastive loss Eq.(2) in the paper
     Constrain the instance features within different masks to be as far apart as possible.
@@ -119,21 +123,22 @@ def separation_loss(feat_mean_stack):
     # expand feat_mean_stack[N, 6] to [N, N, 6]
     feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
     feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
-    
+
     # distance
     diff_squared = (feat_expanded - feat_transposed).pow(2).sum(2)
-    
+
     # Calculate the inverse of the distance to enhance discrimination
     epsilon = 1     # 1e-6
     inverse_distance = 1.0 / (diff_squared + epsilon)
     # Exclude diagonal elements (distance from itself) and calculate the mean inverse distance
     mask = torch.eye(N, device=feat_mean_stack.device).bool()
-    inverse_distance.masked_fill_(mask, 0)  
+    inverse_distance.masked_fill_(mask, 0)
 
     # note: weight
     # sorted by distance
     sorted_indices = inverse_distance.argsort().argsort()
-    loss_weight = (sorted_indices.float() / (N - 1)) * (1.0 - 0.1) + 0.1    # scale to 0.1 - 1.0, [N, N]
+    loss_weight = (sorted_indices.float() / (N - 1)) * \
+        (1.0 - 0.1) + 0.1    # scale to 0.1 - 1.0, [N, N]
     # small weight
     inverse_distance *= loss_weight     # [N, N]
 
@@ -142,10 +147,11 @@ def separation_loss(feat_mean_stack):
 
     return loss
 
+
 def cohesion_loss(gt_masks, feat_map, feature_mean):
     """
     Computes cohesion loss using externally provided per-mask mean features.
-    
+
     Args:
         gt_masks (Tensor): [num_masks, H1, W1] boolean instance masks
         feat_map (Tensor): [6, H, W] feature map with 6 channels
@@ -160,12 +166,15 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
 
     # Resize masks if needed
     if (mask_h, mask_w) != (H, W):
-        gt_masks = torch.nn.functional.interpolate(gt_masks.unsqueeze(1).float(), size=(H, W), mode='nearest')
+        gt_masks = torch.nn.functional.interpolate(
+            gt_masks.unsqueeze(1).float(), size=(H, W), mode='nearest')
         gt_masks = gt_masks.squeeze(1)  # [num_masks, H, W]
 
     # Expand tensors
-    feat_exp = feat_map.unsqueeze(0).expand(num_masks, -1, -1, -1)       # [num_masks, 6, H, W]
-    mask_exp = gt_masks.unsqueeze(1).expand(-1, C, -1, -1)               # [num_masks, 6, H, W]
+    feat_exp = feat_map.unsqueeze(0).expand(
+        num_masks, -1, -1, -1)       # [num_masks, 6, H, W]
+    # [num_masks, 6, H, W]
+    mask_exp = gt_masks.unsqueeze(1).expand(-1, C, -1, -1)
 
     # Apply masks to features
     masked_feats = ele_multip_in_chunks(feat_exp, mask_exp, 2)
@@ -177,6 +186,7 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
     # Mean L1 loss between masked features and masked means
     l1 = (torch.abs(masked_feats - mean_feats_masked)).mean()
     return l1
+
 
 def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors):
     """
@@ -201,16 +211,21 @@ def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors
 
     # Step 2: Compute distances and get k nearest neighbors (excluding self if necessary)
     dists = torch.cdist(sampled_pos, gaussians)       # [m, N]
-    neighbor_indices = dists.topk(num_of_neighbors, largest=False).indices  # [m, k]
+    neighbor_indices = dists.topk(
+        num_of_neighbors, largest=False).indices  # [m, k]
     neighbor_feats = ins_feat[neighbor_indices]       # [m, k, D]
 
     # Step 3: Softmax over feature dimension
-    sampled_softmax = F.softmax(sampled_feat, dim=-1).unsqueeze(1)       # [m, 1, D]
-    neighbor_softmax = F.softmax(neighbor_feats, dim=-1)                 # [m, k, D]
+    sampled_softmax = F.softmax(
+        sampled_feat, dim=-1).unsqueeze(1)       # [m, 1, D]
+    neighbor_softmax = F.softmax(
+        neighbor_feats, dim=-1)                 # [m, k, D]
 
     # Step 4: Compute KL divergence: KL(P || Q) = sum P * log(P / Q)
     eps = 1e-8  # for numerical stability
-    kl_div = sampled_softmax * torch.log((sampled_softmax + eps) / (neighbor_softmax + eps))  # [m, k, D]
+    kl_div = sampled_softmax * \
+        torch.log((sampled_softmax + eps) /
+                  (neighbor_softmax + eps))  # [m, k, D]
     loss = kl_div.sum(dim=-1).mean()  # scalar
 
     return loss
