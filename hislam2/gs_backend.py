@@ -14,7 +14,7 @@ try:
 except ImportError:
     SummaryWriter = None
 
-from hislam2.util.utils import Log, clone_obj, read_masks, mask_feature_mean
+from hislam2.util.utils import Log, clone_obj, mask_feature_mean
 from hislam2.gaussian.renderer import render
 from hislam2.gaussian.utils.loss_utils import l1_loss, ssim, separation_loss, cohesion_loss, kl_regularization_loss
 from hislam2.gaussian.scene.gaussian_model import GaussianModel
@@ -24,6 +24,7 @@ from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
 from hislam2.gaussian.semantics.mask_generator import MaskGenerator
+from hislam2.gaussian.semantics.mask_reader import read_gt_masks
 
 
 class GSBackEnd(mp.Process):
@@ -239,12 +240,18 @@ class GSBackEnd(mp.Process):
             loss_init = get_loss_mapping_rgbd(
                 self.config, image, depth, viewpoint)
             if self.iteration_count > self.optimize_ins_feats_step and self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
-                self.mask_generator.generate_and_save_masks(viewpoint)
-                sam_masks = self.mask_generator.read_masks(
-                    viewpoint, type='instance').cuda()
+                if self.config["masks"]["gt_masks"]:
+                    sam_masks = read_gt_masks(
+                        viewpoint.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
+                    semantic_masks = read_gt_masks(
+                        viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+                else:
+                    self.mask_generator.generate_and_save_masks(viewpoint)
+                    sam_masks = self.mask_generator.read_masks(
+                        viewpoint, type='instance').cuda()
+                    semantic_masks = self.mask_generator.read_masks(
+                        viewpoint, type='semantic').cuda()
                 feature_mean = mask_feature_mean(ins_feat, sam_masks)
-                semantic_masks = self.mask_generator.read_masks(
-                    viewpoint, type='semantic').cuda()
                 semantic_feature_mean = mask_feature_mean(
                     ins_feat, semantic_masks)
                 s_loss = separation_loss(feature_mean)
@@ -335,10 +342,17 @@ class GSBackEnd(mp.Process):
                 semantic_loss = 0
                 if self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
                     self.mask_generator.generate_and_save_masks(viewpoint)
-                    sam_masks = self.mask_generator.read_masks(
-                        viewpoint, type='instance').cuda()
-                    semantic_masks = self.mask_generator.read_masks(
-                        viewpoint, type='semantic').cuda()
+                    if self.config["masks"]["gt_masks"]:
+                        sam_masks = read_gt_masks(
+                            viewpoint.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
+                        semantic_masks = read_gt_masks(
+                            viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+                    else:
+                        self.mask_generator.generate_and_save_masks(viewpoint)
+                        sam_masks = self.mask_generator.read_masks(
+                            viewpoint, type='instance').cuda()
+                        semantic_masks = self.mask_generator.read_masks(
+                            viewpoint, type='semantic').cuda()
                     semantic_feature_mean = mask_feature_mean(
                         ins_feat, semantic_masks)
                     feature_mean = mask_feature_mean(ins_feat, sam_masks)
@@ -450,10 +464,17 @@ class GSBackEnd(mp.Process):
                 image + viewpoint_cam.exposure_b
             if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
                 self.mask_generator.generate_and_save_masks(viewpoint_cam)
-                sam_masks = self.mask_generator.read_masks(
-                    viewpoint_cam, type='instance').cuda()
-                semantic_masks = self.mask_generator.read_masks(
-                    viewpoint_cam, type='semantic').cuda()
+                if self.config["masks"]["gt_masks"]:
+                    sam_masks = read_gt_masks(
+                        viewpoint_cam.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
+                    semantic_masks = read_gt_masks(
+                        viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+                else:
+                    self.mask_generator.generate_and_save_masks(viewpoint_cam)
+                    sam_masks = self.mask_generator.read_masks(
+                        viewpoint_cam, type='instance').cuda()
+                    semantic_masks = self.mask_generator.read_masks(
+                        viewpoint_cam, type='semantic').cuda()
                 feature_mean = mask_feature_mean(ins_feat, sam_masks)
                 s_loss = separation_loss(feature_mean)
                 semantic_feature_mean = mask_feature_mean(

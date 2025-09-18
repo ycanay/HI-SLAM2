@@ -41,7 +41,7 @@ Training:
   rgb_boundary_threshold: 0.01
   lambda_dnormal: 0.1
   compensate_exposure: false
-  optimize_ins_feats_step: 0
+  optimize_ins_feats_step: 900
 
 opt_params:
   iteration_per_scene: 10
@@ -57,9 +57,10 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.02
-  ins_feat_optimization_per_step: 5
+  lambda_cohesion: 0.005
+  ins_feat_optimization_per_step: 3
 masks:
-  sam_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/component_segmentation/"
-  semantic_mask_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/masks_parts"
+  instance_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/instance_masks"
+  semantic_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/semantic_masks"
   network: "facebook/mask2former-swin-large-ade-semantic"
+  gt_masks: true
