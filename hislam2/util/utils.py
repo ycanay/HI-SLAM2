@@ -104,12 +104,11 @@ def clone_obj(obj):
 
 def mask_feature_mean(feat_map, gt_masks):
     """Compute the average instance features within each mask.
-    feat_map: [C=6, H, W]         the instance features of the entire image
+    feat_map: [C=D, H, W]         the instance features of the entire image
     gt_masks: [num_mask, mask_h, mask_w]  num_mask boolean masks
     """
     num_mask, mask_h, mask_w = gt_masks.shape
     C, H, W = feat_map.shape
-    assert C == 6, "The feature map should have 6 channels."
 
     # Resize masks to match feature map size using nearest neighbor interpolation
     if (mask_h, mask_w) != (H, W):
@@ -121,21 +120,21 @@ def mask_feature_mean(feat_map, gt_masks):
 
     # expand feat and masks for batch processing
     feat_expanded = feat_map.unsqueeze(0).expand(
-        num_mask, *feat_map.shape)  # [num_mask, 6, H, W]
+        num_mask, *feat_map.shape)  # [num_mask, D, H, W]
     masks_expanded = gt_masks.unsqueeze(
-        1).expand(-1, feat_map.shape[0], -1, -1)  # [num_mask, 6, H, W]
+        1).expand(-1, feat_map.shape[0], -1, -1)  # [num_mask, D, H, W]
     masked_feats = ele_multip_in_chunks(
         feat_expanded, masks_expanded, chunk_size=2)   # in chuck to avoid OOM
-    mask_counts = masks_expanded.sum(dim=(2, 3))  # [num_mask, 6]
+    mask_counts = masks_expanded.sum(dim=(2, 3))  # [num_mask, D]
 
     # the number of pixels within each mask
     mask_counts = mask_counts.clamp(min=1)
 
     # the mean features of each mask
     sum_per_channel = masked_feats.sum(dim=[2, 3])
-    mean_per_channel = sum_per_channel / mask_counts    # [num_mask, 6]
+    mean_per_channel = sum_per_channel / mask_counts    # [num_mask, D]
 
-    return mean_per_channel   # [num_mask, 6]
+    return mean_per_channel   # [num_mask, D]
 
 
 def ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5):

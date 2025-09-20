@@ -229,3 +229,15 @@ def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors
     loss = kl_div.sum(dim=-1).mean()  # scalar
 
     return loss
+
+
+def prediction_loss(pred, target):
+    """ Cross entropy loss for semantic prediction
+
+    Args:
+        pred (Tensor): [N, num_classes] predicted logits
+        target (Tensor): [N] ground truth labels
+    Returns:
+        Tensor: scalar loss
+    """
+    return F.cross_entropy(pred, target)

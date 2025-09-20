@@ -14,6 +14,7 @@ import numpy as np
 import lietorch
 import resource
 import shutil
+import subprocess
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (100000, rlimit[1]))
 
@@ -116,6 +117,19 @@ if __name__ == '__main__':
 
     shutil.copyfile(str(args.config), str(
         os.path.join(args.output, "config.yaml")))
+
+    try:
+        result = subprocess.run(
+            ["git", "diff"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        with open(args.output, 'w') as f:
+            f.write(result.stdout)
+    except Exception as e:
+        print(f"Failed to save git diff: {e}")
 
     hi2 = None
     queue = Queue(maxsize=8)

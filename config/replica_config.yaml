@@ -41,7 +41,7 @@ Training:
   rgb_boundary_threshold: 0.01
   lambda_dnormal: 0.1
   compensate_exposure: false
-  optimize_ins_feats_step: 900
+  optimize_ins_feats_step: 0
 
 opt_params:
   iteration_per_scene: 10
@@ -63,4 +63,4 @@ masks:
   instance_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/instance_masks"
   semantic_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/semantic_masks"
   network: "facebook/mask2former-swin-large-ade-semantic"
-  gt_masks: true
+  gt_masks: false
