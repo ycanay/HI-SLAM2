@@ -126,7 +126,7 @@ if __name__ == '__main__':
             check=True
         )
 
-        with open(args.output, 'w') as f:
+        with open(os.path.join(args.output, "git_diff.txt"), 'w') as f:
             f.write(result.stdout)
     except Exception as e:
         print(f"Failed to save git diff: {e}")

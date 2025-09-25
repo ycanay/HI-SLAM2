@@ -59,7 +59,10 @@ class GSBackEnd(mp.Process):
         self.predictor = Predictor(
             input_dim=6, hidden_dim=256, output_dim=self.mask_generator.segmenter.model.config.num_labels).cuda()
         self.predictor.train()
-
+        self.predictor_optimizer = torch.optim.Adam(
+            self.predictor.parameters(), lr=0.001)
+        self.predictor_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            self.predictor_optimizer, gamma=0.9)
         if SummaryWriter:
             self.writer = SummaryWriter(
                 log_dir=os.path.join(save_dir, 'tensorboard'))
@@ -244,7 +247,7 @@ class GSBackEnd(mp.Process):
             loss_init = get_loss_mapping_rgbd(
                 self.config, image, depth, viewpoint)
             if self.iteration_count > self.optimize_ins_feats_step and self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
-                sam_mask_ids, semantic_mask_ids = None, None
+                semantic_mask_ids = None
                 if self.config["masks"]["gt_masks"]:
                     sam_masks = read_gt_masks(
                         viewpoint.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
@@ -252,28 +255,26 @@ class GSBackEnd(mp.Process):
                         viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                 else:
                     self.mask_generator.generate_and_save_masks(viewpoint)
-                    sam_masks, sam_mask_ids = self.mask_generator.read_masks(
-                        viewpoint, type='instance')
+                    sam_masks = read_gt_masks(
+                        viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                     semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                         viewpoint, type='semantic')
-                    sam_masks, sam_mask_ids = sam_masks.cuda(), sam_mask_ids.cuda()
                     semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
-                semantic_mask_feature_mean = mask_feature_mean(
+                sam_masks_feature_mean = mask_feature_mean(
                     ins_feat, sam_masks)
-                instance_mask_feature_mean = mask_feature_mean(
+                semantic_mask_feature_mean = mask_feature_mean(
                     ins_feat, semantic_masks)
-                s_loss = separation_loss(semantic_mask_feature_mean)
-                c_loss = separation_loss(instance_mask_feature_mean)
-                if sam_mask_ids is not None and semantic_mask_ids is not None:
-                    feature_mean = mask_feature_mean(
-                        ins_feat, semantic_masks)
-                    predictions = self.predictor(feature_mean)
-                    p_loss = prediction_loss(
-                        predictions, semantic_mask_ids)
-                    loss_init += p_loss
-                    if self.writer:
-                        self.writer.add_scalar(
-                            'InitLoss/prediction_loss', p_loss.item(), self.iteration_count)
+                s_loss = separation_loss(sam_masks_feature_mean)
+                c_loss = cohesion_loss(
+                    semantic_masks, ins_feat, semantic_mask_feature_mean)
+                if semantic_mask_ids is not None:
+                    predictions = self.predictor(semantic_mask_feature_mean)
+                    # p_loss = prediction_loss(
+                    #     predictions, semantic_mask_ids)
+                    # loss_init += p_loss * 0.01
+                    # if self.writer:
+                    #     self.writer.add_scalar(
+                    #         'InitLoss/prediction_loss', p_loss.item(), self.iteration_count)
                 loss_init += s_loss + c_loss * self.opt_params.lambda_cohesion
             if self.writer:
                 self.writer.add_scalar(
@@ -358,7 +359,7 @@ class GSBackEnd(mp.Process):
                 loss_mapping += rgbd_loss
                 semantic_loss = 0
                 if self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0:
-                    sam_mask_ids, semantic_mask_ids = None, None
+                    semantic_mask_ids = None
                     if self.config["masks"]["gt_masks"]:
                         sam_masks = read_gt_masks(
                             viewpoint.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
@@ -366,25 +367,26 @@ class GSBackEnd(mp.Process):
                             viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                     else:
                         self.mask_generator.generate_and_save_masks(viewpoint)
-                        sam_masks, sam_mask_ids = self.mask_generator.read_masks(
-                            viewpoint, type='instance')
+                        sam_masks = read_gt_masks(
+                            viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                         semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                             viewpoint, type='semantic')
-                        sam_masks, sam_mask_ids = sam_masks.cuda(), sam_mask_ids.cuda()
                         semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
                     semantic_mask_feature_mean = mask_feature_mean(
-                        ins_feat, sam_masks)
-                    instance_mask_feature_mean = mask_feature_mean(
                         ins_feat, semantic_masks)
-                    s_loss = separation_loss(semantic_mask_feature_mean)
-                    c_loss = separation_loss(instance_mask_feature_mean)
-                    if sam_mask_ids is not None and semantic_mask_ids is not None:
-                        feature_mean = mask_feature_mean(
-                            ins_feat, semantic_masks)
-                        predictions = self.predictor(feature_mean)
+                    sam_mask_feature_mean = mask_feature_mean(
+                        ins_feat, sam_masks)
+                    s_loss = separation_loss(sam_mask_feature_mean)
+                    c_loss = cohesion_loss(
+                        semantic_masks, ins_feat, semantic_mask_feature_mean)
+                    if semantic_mask_ids is not None:
+                        predictions = self.predictor(
+                            semantic_mask_feature_mean)
                         p_loss = prediction_loss(
                             predictions, semantic_mask_ids)
-                        semantic_loss += p_loss
+                        p_loss.backward(retain_graph=True)
+                        self.predictor_optimizer.step()
+                        self.predictor_optimizer.zero_grad(set_to_none=True)
                         if self.writer:
                             self.writer.add_scalar(
                                 'Loss/prediction_loss', p_loss.item(), self.iteration_count)
@@ -493,39 +495,41 @@ class GSBackEnd(mp.Process):
             image = (torch.exp(viewpoint_cam.exposure_a)) * \
                 image + viewpoint_cam.exposure_b
             loss = 0
-            if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
-                sam_mask_ids, semantic_mask_ids = None, None
-                if self.config["masks"]["gt_masks"]:
-                    sam_masks = read_gt_masks(
-                        viewpoint_cam.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
-                    semantic_masks = read_gt_masks(
-                        viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
-                else:
-                    self.mask_generator.generate_and_save_masks(viewpoint_cam)
-                    sam_masks, sam_mask_ids = self.mask_generator.read_masks(
-                        viewpoint_cam, type='instance')
-                    semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
-                        viewpoint_cam, type='semantic')
-                    sam_masks, sam_mask_ids = sam_masks.cuda(), sam_mask_ids.cuda()
-                    semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
-                semantic_mask_feature_mean = mask_feature_mean(
-                    ins_feat, sam_masks)
-                instance_mask_feature_mean = mask_feature_mean(
-                    ins_feat, semantic_masks)
-                s_loss = separation_loss(semantic_mask_feature_mean)
-                c_loss = separation_loss(instance_mask_feature_mean)
-                r_loss = kl_regularization_loss(
-                    self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
-                if sam_mask_ids is not None and semantic_mask_ids is not None:
-                    feature_mean = mask_feature_mean(
-                        ins_feat, semantic_masks)
-                    predictions = self.predictor(feature_mean)
-                    p_loss = prediction_loss(
-                        predictions, semantic_mask_ids)
-                    loss += p_loss
-                    if self.writer:
-                        self.writer.add_scalar(
-                            'Refinement_Loss/prediction_loss', p_loss.item(), iteration)
+            semantic_mask_ids = None
+            if self.config["masks"]["gt_masks"]:
+                sam_masks = read_gt_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["instance_mask_dir"]).cuda()
+                semantic_masks = read_gt_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
+            else:
+                self.mask_generator.generate_and_save_masks(viewpoint_cam)
+                sam_masks = read_gt_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
+                semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
+                    viewpoint_cam, type='semantic')
+                semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
+            sam_mask_feature_mean = mask_feature_mean(
+                ins_feat, sam_masks)
+            semantic_mask_feature_mean = mask_feature_mean(
+                ins_feat, semantic_masks)
+            s_loss = separation_loss(sam_mask_feature_mean)
+            c_loss = cohesion_loss(
+                semantic_masks, ins_feat, semantic_mask_feature_mean)
+            r_loss = kl_regularization_loss(
+                self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
+            if semantic_mask_ids is not None:
+                feature_mean_cpy = semantic_mask_feature_mean.clone().detach()
+                predictions = self.predictor(feature_mean_cpy)
+                p_loss = prediction_loss(
+                    predictions, semantic_mask_ids)
+                p_loss.backward(retain_graph=True)
+                self.predictor_optimizer.step()
+                self.predictor_optimizer.zero_grad(set_to_none=True)
+                if self.writer:
+                    self.writer.add_scalar(
+                        'Refinement_Loss/prediction_loss', p_loss.item(), iteration)
+                if iteration % 100 == 0:
+                    self.predictor_scheduler.step()
 
             gt_image = viewpoint_cam.original_image.cuda()
             l1_loss_color = l1_loss(image, gt_image)
@@ -571,6 +575,14 @@ class GSBackEnd(mp.Process):
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 lr = self.gaussians.update_learning_rate(iteration)
 
+                update_gaussian = iteration % self.gaussian_update_every == self.gaussian_update_offset
+                if update_gaussian:
+                    self.gaussians.densify_and_prune(
+                        self.opt_params.densify_grad_threshold,
+                        self.gaussian_th,
+                        self.gaussian_extent,
+                        self.size_threshold,
+                    )
                 self.keyframe_optimizers.step()
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
                 update_pose(viewpoint_cam)
@@ -589,44 +601,6 @@ class GSBackEnd(mp.Process):
                 random.randint(0, len(viewpoint_idx_stack) - 1))
             indexes.append(viewpoint_cam_idx)
 
-        # number_clusters_list = [128, 64, 32]
-        # for number_clusters in number_clusters_list:
-        #     with torch.no_grad():
-        #         self.gaussians.cluster_labels, merged_clusters = create_clusters_iterative(self.gaussians.get_ins_feat, self.gaussians.get_xyz,
-        #                                                                                    num_iterations=2, num_init_clusters=number_clusters, verbose=True)
-        #         self.gaussians.cluster_labels = self.gaussians.cluster_labels.to(
-        #             self.gaussians.get_ins_feat.device)
-
-        #         # Build color map (list of [3] tensors with values 0–255)
-        #         color_map = self.distinct_colors(number_clusters)
-        #         color_map = torch.stack(color_map, dim=0).to(
-        #             self.gaussians.get_ins_feat.device)  # [number_clusters, 3]
-        #         cluster_features = torch.stack([
-        #             d['avg_feature'].view(-1) for d in merged_clusters
-        #         ], dim=0)  # [number_clusters, 6]
-        #         if self.writer:
-        #             for vp_idx, viewpoint_cam_idx in enumerate(indexes):
-        #                 viewpoint_cam = self.viewpoints[viewpoint_cam_idx]
-        #                 render_features = render(viewpoint_cam, self.gaussians,
-        #                                          self.background, self.empty_ins_feats)["rendered_features"]
-        #                 W, H = render_features.shape[1], render_features.shape[2]
-        #                 flat_features = render_features.permute(
-        #                     1, 2, 0).reshape(-1, 6)  # [W*H, 6]
-        #                 dists = torch.cdist(
-        #                     # [W*H, number_clusters]
-        #                     flat_features, cluster_features)
-        #                 closest_clusters = torch.argmin(dists, dim=1)  # [W*H]
-        #                 assignments = closest_clusters.view(W, H).to(
-        #                     self.gaussians.get_ins_feat.device)  # [W, H]
-        #                 flat_assignments = assignments.reshape(-1)  # [W*H]
-        #                 seg_colors = color_map[flat_assignments]  # [W*H, 3]
-        #                 seg_colors = seg_colors.view(W, H, 3)
-        #                 segmentation_assignment = seg_colors.permute(
-        #                     2, 0, 1)  # [3, W, H]
-        #                 self.log_rgb_images(f'Final_seg_{number_clusters}',
-        #                                     segmentation_assignment, vp_idx)
-
-        # Build color map (list of [3] tensors with values 0–255)
         color_map = self.distinct_colors(
             self.mask_generator.segmenter.model.config.num_labels)
         color_map = torch.stack(color_map, dim=0).to(

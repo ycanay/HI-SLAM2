@@ -2,6 +2,11 @@ from hislam2.cluster_gaussians import over_segmentation
 import torch
 from itertools import product
 import logging
+from sklearn.cluster import HDBSCAN
+from sklearn.neighbors import NearestNeighbors
+from collections import Counter
+import numpy as np
+
 logger = logging.getLogger(__name__)
 logger.setLevel('INFO')
 FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -245,3 +250,75 @@ def create_clusters_iterative(ins_feats, gaussian_pos, num_iterations=5, num_ini
             logging.info(
                 f"Number of clusters: {int(new_labels.max().item() + 1)}")
     return new_labels, merged_clusters
+
+
+def cluster_hdbscan(ins_feats: torch.Tensor, gaussian_pos: torch.Tensor, min_cluster_size: int = 20):
+    """
+    Clusters instance features using HDBSCAN.
+
+    Args:
+        ins_feats (torch.Tensor): Instance features of shape (N, F).
+        gaussian_pos (torch.Tensor): 3D coordinates of shape (N, 3).
+        min_cluster_size (int): Minimum size of clusters.
+
+    Returns:
+        torch.Tensor: Cluster labels for each point.
+    """
+    ins_feats_np, gaussian_pos_np = ins_feats.cpu().numpy(), gaussian_pos.cpu().numpy()
+    clustering_algo = HDBSCAN(min_cluster_size=min_cluster_size)
+    concat_vector = np.concatenate(
+        (gaussian_pos_np, ins_feats_np), axis=1)
+    concat_vector = concat_vector - concat_vector.mean(axis=0, keepdims=True)
+    concat_vector = concat_vector / \
+        (concat_vector.std(axis=0, keepdims=True) + 1e-6)
+    clustering_algo.fit_predict(concat_vector)
+    clusters = clustering_algo.labels_
+    clusters = assign_noise_to_cluster(concat_vector, clusters)
+    return torch.tensor(clusters, dtype=torch.long, device=ins_feats.device)
+
+
+def assign_noise_to_cluster(concat_vector: np.ndarray, clusters: np.ndarray):
+    final_clusters = clusters.copy()
+    noise_mask = clusters == -1
+    noise_indices = np.where(noise_mask)[0]
+
+    if len(noise_indices) > 0:
+        # Find points that are already clustered (not -1)
+        clustered_mask = clusters != -1
+        clustered_indices = np.where(clustered_mask)[0]
+
+        if len(clustered_indices) > 0:
+            # Initialize KNN with k=5
+            knn = NearestNeighbors(n_neighbors=5, metric='euclidean')
+            knn.fit(concat_vector[clustered_indices])
+
+            # For each noise point, find its 5 nearest clustered neighbors
+            for noise_idx in noise_indices:
+                # Find 5 nearest neighbors among clustered points
+                distances, neighbor_indices = knn.kneighbors(
+                    concat_vector[noise_idx].reshape(1, -1)
+                )
+
+                # Get the actual indices in the original array
+                actual_neighbor_indices = clustered_indices[neighbor_indices[0]]
+
+                # Get the cluster labels of these neighbors
+                neighbor_clusters = clusters[actual_neighbor_indices]
+
+                # Count occurrences of each cluster label
+                cluster_counts = Counter(neighbor_clusters)
+
+                # Find the cluster with the highest count
+                # If there's a tie, choose the one with the highest cluster number
+                most_common_clusters = cluster_counts.most_common()
+
+                if most_common_clusters:
+                    # Handle ties by selecting the highest numbered cluster
+                    max_count = most_common_clusters[0][1]
+                    tied_clusters = [cluster for cluster, count in most_common_clusters
+                                     if count == max_count]
+                    assigned_cluster = max(tied_clusters)
+
+                    # Assign the noise point to this cluster
+                    final_clusters[noise_idx] = assigned_cluster
+    return final_clusters
