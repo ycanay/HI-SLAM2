@@ -26,6 +26,7 @@ from hislam2.gaussian.gui import gui_utils, slam_gui
 from hislam2.gaussian.semantics.mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import read_gt_masks
 from hislam2.gaussian.semantics.predictor import Predictor
+from hislam2.gaussian.utils.post_processing import cluster_hdbscan
 
 
 class GSBackEnd(mp.Process):
@@ -201,6 +202,8 @@ class GSBackEnd(mp.Process):
         self.gaussians.save_ply(f'{self.save_dir}/3dgs_before_opt.ply')
         self.color_refinement(iteration_total=self.gaussians.max_steps)
         self.gaussians.save_ply(f'{self.save_dir}/3dgs_final.ply')
+        torch.save(self.predictor.state_dict(),
+                   f'{self.save_dir}/predictor.pth')
 
         poses_cw = []
         for view in self.viewpoints.values():
@@ -267,14 +270,6 @@ class GSBackEnd(mp.Process):
                 s_loss = separation_loss(sam_masks_feature_mean)
                 c_loss = cohesion_loss(
                     semantic_masks, ins_feat, semantic_mask_feature_mean)
-                if semantic_mask_ids is not None:
-                    predictions = self.predictor(semantic_mask_feature_mean)
-                    # p_loss = prediction_loss(
-                    #     predictions, semantic_mask_ids)
-                    # loss_init += p_loss * 0.01
-                    # if self.writer:
-                    #     self.writer.add_scalar(
-                    #         'InitLoss/prediction_loss', p_loss.item(), self.iteration_count)
                 loss_init += s_loss + c_loss * self.opt_params.lambda_cohesion
             if self.writer:
                 self.writer.add_scalar(
@@ -371,27 +366,34 @@ class GSBackEnd(mp.Process):
                             viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                         semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                             viewpoint, type='semantic')
-                        semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
-                    semantic_mask_feature_mean = mask_feature_mean(
-                        ins_feat, semantic_masks)
+                        if semantic_masks is not None:
+                            semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
                     sam_mask_feature_mean = mask_feature_mean(
                         ins_feat, sam_masks)
                     s_loss = separation_loss(sam_mask_feature_mean)
-                    c_loss = cohesion_loss(
-                        semantic_masks, ins_feat, semantic_mask_feature_mean)
+                    if semantic_masks is not None:
+                        semantic_mask_feature_mean = mask_feature_mean(
+                            ins_feat, semantic_masks)
+                        c_loss = cohesion_loss(
+                            semantic_masks, ins_feat, semantic_mask_feature_mean)
                     if semantic_mask_ids is not None:
                         predictions = self.predictor(
                             semantic_mask_feature_mean)
                         p_loss = prediction_loss(
                             predictions, semantic_mask_ids)
-                        p_loss.backward(retain_graph=True)
-                        self.predictor_optimizer.step()
-                        self.predictor_optimizer.zero_grad(set_to_none=True)
-                        if self.writer:
-                            self.writer.add_scalar(
-                                'Loss/prediction_loss', p_loss.item(), self.iteration_count)
-
-                    semantic_loss += self.opt_params.lambda_cohesion * c_loss + s_loss
+                        semantic_loss += p_loss * 0.01
+                        # p_loss.backward(retain_graph=True)
+                        # self.predictor_optimizer.step()
+                        # self.predictor_optimizer.zero_grad(set_to_none=True)
+                        # if self.writer:
+                        #     self.writer.add_scalar(
+                        #         'Loss/prediction_loss', p_loss.item(), self.iteration_count)
+                        if not hasattr(self, 'pending_p_losses'):
+                            self.pending_p_losses = []
+                        self.pending_p_losses.append(p_loss)
+                    semantic_loss += s_loss
+                    if semantic_masks is not None:
+                        semantic_loss += self.opt_params.lambda_cohesion * c_loss
                     r_loss = kl_regularization_loss(
                         self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
                     semantic_loss += r_loss
@@ -406,8 +408,9 @@ class GSBackEnd(mp.Process):
                             'Loss/separation_loss', s_loss.item(), self.iteration_count)
                         self.writer.add_scalar(
                             'Loss/kl_regularization_loss', r_loss.item(), self.iteration_count)
-                        self.writer.add_scalar(
-                            'Loss/cohesion_loss', c_loss.item(), self.iteration_count)
+                        if semantic_masks is not None:
+                            self.writer.add_scalar(
+                                'Loss/cohesion_loss', c_loss.item(), self.iteration_count)
                         self.writer.add_scalar(
                             'Loss/semantic_loss', semantic_loss.item(), self.iteration_count)
                     if self.iteration_count % 100 == 0:
@@ -427,7 +430,13 @@ class GSBackEnd(mp.Process):
                 self.writer.add_scalar(
                     'Loss/isotropic_loss', isotropic_loss.mean().item(), self.iteration_count)
             loss_mapping += 10 * isotropic_loss.mean()
-            loss_mapping.backward()
+            loss_mapping.backward(retain_graph=True)
+            if hasattr(self, 'pending_p_losses') and self.pending_p_losses:
+                total_p_loss = sum(self.pending_p_losses)
+                total_p_loss.backward()
+                self.predictor_optimizer.step()
+                self.predictor_optimizer.zero_grad(set_to_none=True)
+                self.pending_p_losses = []  # Clear for next iteration
             # Log loss to TensorBoard
             # Deinsifying / Pruning Gaussians
             with torch.no_grad():
@@ -507,14 +516,16 @@ class GSBackEnd(mp.Process):
                     viewpoint_cam.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                 semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                     viewpoint_cam, type='semantic')
-                semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
+                if semantic_masks is not None:
+                    semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
+            if semantic_masks is not None:
+                semantic_mask_feature_mean = mask_feature_mean(
+                    ins_feat, semantic_masks)
+                c_loss = cohesion_loss(
+                    semantic_masks, ins_feat, semantic_mask_feature_mean)
             sam_mask_feature_mean = mask_feature_mean(
                 ins_feat, sam_masks)
-            semantic_mask_feature_mean = mask_feature_mean(
-                ins_feat, semantic_masks)
             s_loss = separation_loss(sam_mask_feature_mean)
-            c_loss = cohesion_loss(
-                semantic_masks, ins_feat, semantic_mask_feature_mean)
             r_loss = kl_regularization_loss(
                 self.gaussians.get_ins_feat, self.gaussians.get_xyz, num_of_samples=1000, num_of_neighbors=5)
             if semantic_mask_ids is not None:
@@ -522,9 +533,13 @@ class GSBackEnd(mp.Process):
                 predictions = self.predictor(feature_mean_cpy)
                 p_loss = prediction_loss(
                     predictions, semantic_mask_ids)
-                p_loss.backward(retain_graph=True)
-                self.predictor_optimizer.step()
-                self.predictor_optimizer.zero_grad(set_to_none=True)
+                loss += p_loss * 0.01
+                # p_loss.backward(retain_graph=True)
+                # self.predictor_optimizer.step()
+                # self.predictor_optimizer.zero_grad(set_to_none=True)
+                if not hasattr(self, 'pending_p_losses'):
+                    self.pending_p_losses = []
+                self.pending_p_losses.append(p_loss)
                 if self.writer:
                     self.writer.add_scalar(
                         'Refinement_Loss/prediction_loss', p_loss.item(), iteration)
@@ -537,7 +552,9 @@ class GSBackEnd(mp.Process):
             loss += (1.0 - self.opt_params.lambda_dssim) * l1_loss_color + \
                 self.opt_params.lambda_dssim * ssim_loss
             if iteration % self.opt_params.ins_feat_optimization_per_step == 0:
-                loss += s_loss + c_loss * self.opt_params.lambda_cohesion + r_loss
+                if semantic_masks is not None:
+                    loss += c_loss * self.opt_params.lambda_cohesion
+                loss += s_loss + r_loss
             rgb_mapping_loss = get_loss_mapping_rgbd(
                 self.config, image, depth, viewpoint_cam)
             loss += rgb_mapping_loss
@@ -553,8 +570,9 @@ class GSBackEnd(mp.Process):
                         'Refinement_Loss/separation_loss', s_loss.item(), iteration)
                     self.writer.add_scalar(
                         'Refinement_Loss/kl_regularization_loss', r_loss.item(), iteration)
-                    self.writer.add_scalar(
-                        'Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
+                    if semantic_masks is not None:
+                        self.writer.add_scalar(
+                            'Refinement_Loss/cohesion_loss', c_loss.item(), iteration)
                 self.writer.add_scalar(
                     'Refinement_Loss/rgb_mapping_loss', rgb_mapping_loss.item(), iteration)
                 if iteration % 100 == 0:
@@ -568,7 +586,14 @@ class GSBackEnd(mp.Process):
             else:
                 loss += self.lambda_dnormal * \
                     get_loss_normal(depth, viewpoint_cam) / 2
-            loss.backward()
+            loss.backward(retain_graph=True)
+            if hasattr(self, 'pending_p_losses') and self.pending_p_losses:
+                total_p_loss = sum(self.pending_p_losses)
+                total_p_loss.backward()
+                self.predictor_optimizer.step()
+                self.predictor_optimizer.zero_grad(set_to_none=True)
+                self.pending_p_losses = []  # Clear for next iteration
+
             # Log color refinement loss to TensorBoard
             with torch.no_grad():
                 self.gaussians.optimizer.step()
@@ -593,6 +618,32 @@ class GSBackEnd(mp.Process):
 
             pbar.set_description(
                 f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
+
+        # Final segmentation
+        with torch.no_grad():
+            cluster_labels = cluster_hdbscan(self.gaussians.get_ins_feat.cpu(),
+                                             self.gaussians.get_xyz.cpu(),
+                                             30)
+            self.gaussians.cluster_index = cluster_labels.to(
+                self.gaussians.get_ins_feat.device)
+            self.gaussians.segmentation_label = torch.zeros_like(
+                cluster_labels)
+            unique_labels = np.unique(cluster_labels.cpu().numpy())
+            mean_features = {}
+            for label in unique_labels:
+                if label == -1:
+                    continue  # Skip noise points
+                with torch.no_grad():
+                    mask = (cluster_labels == label)
+                    cluster_features = self.gaussians.get_ins_feat[mask]
+                    outs = self.predictor(cluster_features.cuda())
+                    outs = torch.softmax(outs, dim=-1).mean(0).cpu().numpy()
+                    self.gaussians.segmentation_label[label] = outs.argmax()
+                    mean_feature = torch.mean(
+                        cluster_features, dim=0)
+                    mean_features[label] = {"mean_feature": mean_feature,
+                                            "label": outs.argmax()}
+            self.gaussians.cluster_features = mean_features
 
         indexes = []
         for vp_idx in range(10):

@@ -43,7 +43,9 @@ class GaussianModel:
         self._ins_feat = torch.empty(0, device="cuda")
         self.max_radii2D = torch.empty(0, device="cuda")
         self.xyz_gradient_accum = torch.empty(0, device="cuda")
-        self.cluster_labels = torch.empty(0, device="cuda")
+        self.segmentation_label = torch.empty(0, device="cuda")
+        self.cluster_index = torch.empty(0, device="cuda")
+        self.cluster_features = {}
 
         self.unique_kfIDs = torch.empty(0).int()
         self.n_obs = torch.empty(0).int()

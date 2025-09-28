@@ -147,6 +147,8 @@ class MaskGenerator:
             mask = np.array(Image.open(mask_file).convert("L"))
             masks.append(mask)
             mask_ids.append(metadata[mask_file.stem + ".png"]['id'])
+        if mask_files is None or len(masks) == 0:
+            return None, None
         masks = np.stack(masks, axis=0)  # [num_masks, H, W]
         masks = torch.from_numpy(masks)  # convert to torch tensor
         mask_ids = np.stack(mask_ids, axis=0)
