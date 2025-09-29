@@ -23,7 +23,7 @@ from hislam2.gaussian.utils.slam_utils import update_pose, to_se3_vec, get_loss_
 from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
-from hislam2.gaussian.semantics.mask_generator import MaskGenerator
+from hislam2.gaussian.semantics.panoptic_mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import read_gt_masks
 from hislam2.gaussian.semantics.predictor import Predictor
 from hislam2.gaussian.utils.post_processing import cluster_hdbscan
@@ -58,7 +58,7 @@ class GSBackEnd(mp.Process):
 
         self.mask_generator = MaskGenerator(config, save_dir)
         self.predictor = Predictor(
-            input_dim=6, hidden_dim=256, output_dim=self.mask_generator.segmenter.model.config.num_labels).cuda()
+            input_dim=6, hidden_dim=256, output_dim=len(self.mask_generator.id2label)).cuda()
         self.predictor.train()
         self.predictor_optimizer = torch.optim.Adam(
             self.predictor.parameters(), lr=0.001)
@@ -258,8 +258,9 @@ class GSBackEnd(mp.Process):
                         viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                 else:
                     self.mask_generator.generate_and_save_masks(viewpoint)
-                    sam_masks = read_gt_masks(
-                        viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
+                    sam_masks, _ = self.mask_generator.read_masks(
+                        viewpoint, type='instance')
+                    sam_masks = sam_masks.cuda()
                     semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                         viewpoint, type='semantic')
                     semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
@@ -362,8 +363,9 @@ class GSBackEnd(mp.Process):
                             viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                     else:
                         self.mask_generator.generate_and_save_masks(viewpoint)
-                        sam_masks = read_gt_masks(
-                            viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
+                        sam_masks, _ = self.mask_generator.read_masks(
+                            viewpoint, type='instance')
+                        sam_masks = sam_masks.cuda()
                         semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                             viewpoint, type='semantic')
                         if semantic_masks is not None:
@@ -391,6 +393,10 @@ class GSBackEnd(mp.Process):
                         if not hasattr(self, 'pending_p_losses'):
                             self.pending_p_losses = []
                         self.pending_p_losses.append(p_loss)
+                        if self.writer:
+                            self.writer.add_scalar(
+                                'Loss/prediction_loss', p_loss.item(), self.iteration_count)
+
                     semantic_loss += s_loss
                     if semantic_masks is not None:
                         semantic_loss += self.opt_params.lambda_cohesion * c_loss
@@ -512,8 +518,9 @@ class GSBackEnd(mp.Process):
                     viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
             else:
                 self.mask_generator.generate_and_save_masks(viewpoint_cam)
-                sam_masks = read_gt_masks(
-                    viewpoint_cam.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
+                sam_masks, _ = self.mask_generator.read_masks(
+                    viewpoint_cam, type='instance')
+                sam_masks = sam_masks.cuda()
                 semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                     viewpoint_cam, type='semantic')
                 if semantic_masks is not None:
@@ -653,7 +660,7 @@ class GSBackEnd(mp.Process):
             indexes.append(viewpoint_cam_idx)
 
         color_map = self.distinct_colors(
-            self.mask_generator.segmenter.model.config.num_labels)
+            len(self.mask_generator.id2label))
         color_map = torch.stack(color_map, dim=0).to(
             self.gaussians.get_ins_feat.device)  # [num_labels, 3]
         if self.writer:
