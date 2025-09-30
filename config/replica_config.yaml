@@ -63,5 +63,5 @@ masks:
   instance_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/instance_masks"
   semantic_mask_dir: "/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics/room0/semantic_masks"
   network: "facebook/mask2former-swin-large-ade-semantic"
-  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/office1/sam_masks/"
+  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/room0/sam_masks/"
   gt_masks: false

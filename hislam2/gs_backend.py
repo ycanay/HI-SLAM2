@@ -258,9 +258,8 @@ class GSBackEnd(mp.Process):
                         viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                 else:
                     self.mask_generator.generate_and_save_masks(viewpoint)
-                    sam_masks, _ = self.mask_generator.read_masks(
-                        viewpoint, type='instance')
-                    sam_masks = sam_masks.cuda()
+                    sam_masks = read_gt_masks(
+                        viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                     semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                         viewpoint, type='semantic')
                     semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
@@ -363,9 +362,8 @@ class GSBackEnd(mp.Process):
                             viewpoint.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
                     else:
                         self.mask_generator.generate_and_save_masks(viewpoint)
-                        sam_masks, _ = self.mask_generator.read_masks(
-                            viewpoint, type='instance')
-                        sam_masks = sam_masks.cuda()
+                        sam_masks = read_gt_masks(
+                            viewpoint.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                         semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                             viewpoint, type='semantic')
                         if semantic_masks is not None:
@@ -518,8 +516,8 @@ class GSBackEnd(mp.Process):
                     viewpoint_cam.tstamp, self.config["masks"]["semantic_mask_dir"]).cuda()
             else:
                 self.mask_generator.generate_and_save_masks(viewpoint_cam)
-                sam_masks, _ = self.mask_generator.read_masks(
-                    viewpoint_cam, type='instance')
+                sam_masks = read_gt_masks(
+                    viewpoint_cam.tstamp, self.config["masks"]["sam_masks_dir"]).cuda()
                 sam_masks = sam_masks.cuda()
                 semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
                     viewpoint_cam, type='semantic')
