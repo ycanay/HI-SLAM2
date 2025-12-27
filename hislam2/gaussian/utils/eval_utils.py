@@ -1,15 +1,15 @@
 import json
 import os
-import colorsys
 import cv2
 import numpy as np
 import torch
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from hislam2.util.utils import Log
+from hislam2.util.utils import Log, distinct_colors
 from hislam2.gaussian.renderer import render
 from hislam2.gaussian.utils.loss_utils import ssim, psnr
 from hislam2.gaussian.utils.camera_utils import Camera
 from tqdm import tqdm
+import math
 
 
 def _save_json(data, path):
@@ -63,9 +63,17 @@ def _save_rendering_outputs(idx, image, ins_feat, depth, instance_ids, save_dirs
         1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
     pred_feat_2 = cv2.cvtColor((ins_feat_cpu[3:6].transpose(
         1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
+    unique_ids = torch.unique(instance_ids)
+    K = len(unique_ids)
+    colors = distinct_colors(K)
 
-    instance_ids_img = cv2.cvtColor(
-        instance_ids.cpu().numpy().astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    # Create a color mapping for each instance ID
+    color_map = {id.item(): colors[i] for i, id in enumerate(unique_ids)}
+    instance_ids_np = instance_ids.cpu().numpy().astype(np.uint8)
+    instance_ids_img = np.zeros((*instance_ids_np.shape, 3), dtype=np.uint8)
+    for instance_id, color in color_map.items():
+        mask = instance_ids_np == instance_id
+        instance_ids_img[mask] = color
 
     cv2.imwrite(f'{save_dirs["image"]}/{idx:06d}.jpg', pred)
     cv2.imwrite(f'{save_dirs["depth"]}/{idx:06d}.png',
@@ -224,17 +232,6 @@ def save_gaussians(gaussians, name, iteration, final=False):
     )
     gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
     print('saved to', point_cloud_path)
-
-
-def distinct_colors(K):
-    color_map = []
-    for i in range(K):
-        h = i / K
-        s = 0.6 + 0.4 * (i % 2)
-        v = 0.7 + 0.3 * ((i // 2) % 2)
-        rgb = [int(x * 255) for x in colorsys.hsv_to_rgb(h, s, v)]
-        color_map.append(torch.tensor(rgb, dtype=torch.uint8))
-    return color_map
 
 
 def create_mappings():

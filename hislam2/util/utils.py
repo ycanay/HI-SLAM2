@@ -6,6 +6,7 @@ import torch
 from matplotlib import cm
 from pathlib import Path
 from PIL import Image
+import math
 
 _log_styles = {
     "GSBackend": "bold green",
@@ -148,3 +149,23 @@ def ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5):
 
             result[i:end_i, j:end_j] = chunk_feat * chunk_mask
     return result
+
+
+def distinct_colors(K):
+    color_div = math.ceil(K ** (1/3))
+    steps = 256 // color_div
+    colors = []
+    last_color = (-steps, 0, 0)
+    for _ in range(K):
+        r = (last_color[0] + steps)
+        g = last_color[1]
+        b = last_color[2]
+        if r >= 256:
+            r = 0
+            g = (last_color[1] + steps)
+            if g >= 256:
+                g = 0
+                b = (last_color[2] + steps)
+        colors.append((r, g, b))
+        last_color = (r, g, b)
+    return colors

@@ -1,4 +1,3 @@
-import colorsys
 import os
 import random
 import time
@@ -8,13 +7,12 @@ import torch.multiprocessing as mp
 from tqdm import trange
 from munch import munchify
 from lietorch import SE3, SO3
-from hislam2.gaussian.utils.post_processing import create_clusters_iterative
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
     SummaryWriter = None
 
-from hislam2.util.utils import Log, clone_obj, mask_feature_mean
+from hislam2.util.utils import Log, clone_obj, mask_feature_mean, distinct_colors
 from hislam2.gaussian.renderer import render
 from hislam2.gaussian.utils.loss_utils import l1_loss, ssim, separation_loss, cohesion_loss, kl_regularization_loss, prediction_loss
 from hislam2.gaussian.scene.gaussian_model import GaussianModel
@@ -381,13 +379,7 @@ class GSBackEnd(mp.Process):
                             semantic_mask_feature_mean)
                         p_loss = prediction_loss(
                             predictions, semantic_mask_ids)
-                        semantic_loss += p_loss * 0.01
-                        # p_loss.backward(retain_graph=True)
-                        # self.predictor_optimizer.step()
-                        # self.predictor_optimizer.zero_grad(set_to_none=True)
-                        # if self.writer:
-                        #     self.writer.add_scalar(
-                        #         'Loss/prediction_loss', p_loss.item(), self.iteration_count)
+                        # semantic_loss += p_loss * 0.01
                         if not hasattr(self, 'pending_p_losses'):
                             self.pending_p_losses = []
                         self.pending_p_losses.append(p_loss)
@@ -441,8 +433,6 @@ class GSBackEnd(mp.Process):
                 self.predictor_optimizer.step()
                 self.predictor_optimizer.zero_grad(set_to_none=True)
                 self.pending_p_losses = []  # Clear for next iteration
-            # Log loss to TensorBoard
-            # Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 for idx in range(len(viewspace_point_tensor_acm)):
                     self.gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
@@ -538,10 +528,7 @@ class GSBackEnd(mp.Process):
                 predictions = self.predictor(feature_mean_cpy)
                 p_loss = prediction_loss(
                     predictions, semantic_mask_ids)
-                loss += p_loss * 0.01
-                # p_loss.backward(retain_graph=True)
-                # self.predictor_optimizer.step()
-                # self.predictor_optimizer.zero_grad(set_to_none=True)
+                # loss += p_loss * 0.01
                 if not hasattr(self, 'pending_p_losses'):
                     self.pending_p_losses = []
                 self.pending_p_losses.append(p_loss)
@@ -624,6 +611,46 @@ class GSBackEnd(mp.Process):
             pbar.set_description(
                 f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}")
 
+        if not self.config["masks"]["gt_masks"]:
+            for iteration in (pbar := trange(1, iteration_total + 1)):
+                viewpoint_idx_stack = list(self.viewpoints.keys())
+                viewpoint_cam_idx = viewpoint_idx_stack.pop(
+                    random.randint(0, len(viewpoint_idx_stack) - 1))
+                viewpoint_cam = self.viewpoints[viewpoint_cam_idx]
+                self.mask_generator.generate_and_save_masks(viewpoint_cam)
+                semantic_masks, semantic_mask_ids = self.mask_generator.read_masks(
+                    viewpoint_cam, type='semantic')
+                if semantic_masks is not None and semantic_mask_ids is not None:
+                    semantic_masks, semantic_mask_ids = semantic_masks.cuda(), semantic_mask_ids.cuda()
+                render_pkg = render(viewpoint_cam, self.gaussians,
+                                    self.background, self.empty_ins_feats)
+                ins_feat = render_pkg["rendered_features"]
+                semantic_mask_ids = None
+                if semantic_mask_ids is not None:
+                    semantic_mask_feature_mean = mask_feature_mean(
+                        ins_feat, semantic_masks)
+                    feature_mean_cpy = semantic_mask_feature_mean.clone().detach()
+                    predictions = self.predictor(feature_mean_cpy)
+                    p_loss = prediction_loss(
+                        predictions, semantic_mask_ids)
+                    if not hasattr(self, 'pending_p_losses'):
+                        self.pending_p_losses = []
+                    self.pending_p_losses.append(p_loss)
+                    if self.writer:
+                        self.writer.add_scalar(
+                            'Prediction_head/prediction_loss', p_loss.item(), iteration)
+                    if iteration % 100 == 0:
+                        self.predictor_scheduler.step()
+
+                if hasattr(self, 'pending_p_losses') and self.pending_p_losses:
+                    total_p_loss = sum(self.pending_p_losses)
+                    total_p_loss.backward()
+                    self.predictor_optimizer.step()
+                    self.predictor_optimizer.zero_grad(set_to_none=True)
+                    self.pending_p_losses = []  # Clear for next iteration
+                    pbar.set_description(
+                        f"Prediction head lr {self.predictor_scheduler.get_last_lr()[0]:.3E} loss {total_p_loss.item():.3f}")
+
         # Final segmentation
         with torch.no_grad():
             cluster_labels = cluster_hdbscan(self.gaussians.get_ins_feat.cpu(),
@@ -657,7 +684,7 @@ class GSBackEnd(mp.Process):
                 random.randint(0, len(viewpoint_idx_stack) - 1))
             indexes.append(viewpoint_cam_idx)
 
-        color_map = self.distinct_colors(
+        color_map = distinct_colors(
             len(self.mask_generator.id2label))
         color_map = torch.stack(color_map, dim=0).to(
             self.gaussians.get_ins_feat.device)  # [num_labels, 3]
@@ -690,14 +717,3 @@ class GSBackEnd(mp.Process):
             self.log_rgb_images('Refinement_Loss/RGB_Image',
                                 image, iteration_total+2)
             self.writer.close()
-
-    def distinct_colors(self, K):
-        color_map = []
-        for i in range(K):
-            h = i / K
-            # alternate between high/low saturation
-            s = 0.6 + 0.4 * ((i % 2))
-            v = 0.7 + 0.3 * ((i // 2) % 2)  # alternate brightness
-            rgb = [int(x * 255) for x in colorsys.hsv_to_rgb(h, s, v)]
-            color_map.append(torch.tensor(rgb, dtype=torch.uint8))
-        return color_map
