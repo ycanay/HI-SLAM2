@@ -68,12 +68,8 @@ def _save_rendering_outputs(idx, image, ins_feat, depth, instance_ids, save_dirs
     colors = distinct_colors(K)
 
     # Create a color mapping for each instance ID
-    color_map = {id.item(): colors[i] for i, id in enumerate(unique_ids)}
-    instance_ids_np = instance_ids.cpu().numpy().astype(np.uint8)
-    instance_ids_img = np.zeros((*instance_ids_np.shape, 3), dtype=np.uint8)
-    for instance_id, color in color_map.items():
-        mask = instance_ids_np == instance_id
-        instance_ids_img[mask] = color
+    instance_ids_img = cv2.cvtColor(
+        instance_ids.cpu().numpy().astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
     cv2.imwrite(f'{save_dirs["image"]}/{idx:06d}.jpg', pred)
     cv2.imwrite(f'{save_dirs["depth"]}/{idx:06d}.png',

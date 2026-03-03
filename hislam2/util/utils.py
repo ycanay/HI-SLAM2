@@ -151,11 +151,11 @@ def ele_multip_in_chunks(feat_expanded, masks_expanded, chunk_size=5):
     return result
 
 
-def distinct_colors(K):
+def distinct_colors(K: int) -> list[torch.Tensor]:
     color_div = math.ceil(K ** (1/3))
     steps = 256 // color_div
     colors = []
-    last_color = (-steps, 0, 0)
+    last_color = torch.tensor([-steps, 0, 0])
     for _ in range(K):
         r = (last_color[0] + steps)
         g = last_color[1]
@@ -166,6 +166,6 @@ def distinct_colors(K):
             if g >= 256:
                 g = 0
                 b = (last_color[2] + steps)
-        colors.append((r, g, b))
-        last_color = (r, g, b)
+        colors.append(torch.tensor([r, g, b]))
+        last_color = torch.tensor([r, g, b])
     return colors
