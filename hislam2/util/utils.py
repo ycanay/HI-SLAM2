@@ -108,8 +108,12 @@ def mask_feature_mean(feat_map, gt_masks):
     feat_map: [C=D, H, W]         the instance features of the entire image
     gt_masks: [num_mask, mask_h, mask_w]  num_mask boolean masks
     """
-    num_mask, mask_h, mask_w = gt_masks.shape
     C, H, W = feat_map.shape
+    num_mask, mask_h, mask_w = gt_masks.shape
+
+    # No valid masks for this frame.
+    if num_mask == 0 or mask_h == 0 or mask_w == 0:
+        return feat_map.new_empty((0, C))
 
     # Resize masks to match feature map size using nearest neighbor interpolation
     if (mask_h, mask_w) != (H, W):

@@ -57,10 +57,11 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.0001
+  lambda_cohesion: 0.0005
   ins_feat_optimization_per_step: 5
 masks:
   network: "facebook/mask2former-swin-large-ade-semantic"
-  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/room2/sam_masks/"
-  sam3_masks_dir: "/storage/user/ayu/repos/sam3/sam3/data/room2/masks/"
+  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/office1/sam_masks/"
+  sam3_masks_dir: "/storage/user/ayu/repos/sam3/sam3/data/office1/masks/"
   no_classes: 101
+mask_cache_max_frames: 500

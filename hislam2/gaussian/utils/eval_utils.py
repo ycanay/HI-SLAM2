@@ -113,8 +113,30 @@ def eval_rendering(
     _save_json(json_compatible_features, os.path.join(
         save_dir, "cluster_features.json"))
 
-    for i, (idx, image) in tqdm(enumerate(gtimages.items()), total=len(gtimages), desc=f"Eval {iteration}"):
-        if idx % 5 != 0 and idx not in kf_idx and i != len(gtimages) - 1:
+    # Determine which frame indices will actually be evaluated so we can
+    # pre-load all required ground-truth depth images in one sequential HDD
+    # pass before the GPU rendering loop starts.  This avoids interleaving
+    # slow random disk reads with GPU work.
+    gtimages_list = list(gtimages.items())
+    n_frames = len(gtimages_list)
+    eval_indices = {
+        idx
+        for i, (idx, _) in enumerate(gtimages_list)
+        if idx % 20 == 0 or idx in kf_idx or i == n_frames - 1
+    }
+
+    # Pre-load gt depth for every evaluated frame (CPU RAM only).
+    gtdepth_cache: dict = {}
+    if gtdepthdir is not None:
+        for idx in tqdm(sorted(eval_indices), desc="Pre-loading gt depths"):
+            raw = cv2.imread(
+                os.path.join(gtdepthdir, gtdepths[idx]), cv2.IMREAD_ANYDEPTH
+            )
+            if raw is not None:
+                gtdepth_cache[idx] = raw.astype(np.float32) / 6553.5
+
+    for i, (idx, image) in tqdm(enumerate(gtimages_list), total=n_frames, desc=f"Eval {iteration}"):
+        if idx not in eval_indices:
             continue
 
         frame = Camera.init_from_tracking(
@@ -131,13 +153,11 @@ def eval_rendering(
         instance_ids = _compute_instance_ids(
             rendering["rendered_features"], gaussians.cluster_features)
 
-        if gtdepthdir is not None:
-            gtdepth = cv2.imread(
-                os.path.join(gtdepthdir, gtdepths[idx]), cv2.IMREAD_ANYDEPTH
-            ) / 6553.5
+        if gtdepthdir is not None and idx in gtdepth_cache:
             gtdepth = cv2.resize(
-                gtdepth, (depth.shape[-1], depth.shape[-2]
-                          ), interpolation=cv2.INTER_NEAREST
+                gtdepth_cache[idx],
+                (depth.shape[-1], depth.shape[-2]),
+                interpolation=cv2.INTER_NEAREST,
             )
             invalid = gtdepth <= 0
             depth[invalid] = 0
