@@ -1,6 +1,9 @@
 import os
 import random
 import time
+import csv
+import json
+from typing import cast
 from collections import OrderedDict
 import numpy as np
 import torch
@@ -60,6 +63,7 @@ class GSBackEnd(mp.Process):
         self.initialized = False
         self.save_dir = save_dir
         self.use_gui = use_gui
+        os.makedirs(self.save_dir, exist_ok=True)
 
         self.opt_params = munchify(config["opt_params"])
         self.config["Training"]["monocular"] = False
@@ -98,6 +102,30 @@ class GSBackEnd(mp.Process):
         self._mask_cache_max_size: int = self.config.get(
             "mask_cache_max_frames", 300
         )
+
+        # Runtime analysis
+        self.runtime_analysis_path = os.path.join(
+            self.save_dir, "runtime_analysis.csv"
+        )
+        self.runtime_summary_path = os.path.join(
+            self.save_dir, "runtime_analysis_summary.json"
+        )
+        self.runtime_analysis_fields = [
+            "phase",
+            "iteration",
+            "frame_tstamp",
+            "num_viewpoints",
+            "optimize_sem",
+            "rendering_scene_s",
+            "reading_masks_s",
+            "calculating_loss_s",
+            "backpropagation_s",
+            "optimizer_step_s",
+            "adaptive_control_s",
+            "total_iteration_s",
+        ]
+        self.runtime_summary = {}
+        self._init_runtime_analysis()
 
         # TensorBoard writer
         if SummaryWriter:
@@ -149,6 +177,69 @@ class GSBackEnd(mp.Process):
     # ------------------------------------------------------------------
     # Logging helpers
     # ------------------------------------------------------------------
+
+    def _init_runtime_analysis(self):
+        """Create or reset runtime analysis outputs in ``save_dir``."""
+        with open(self.runtime_analysis_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.runtime_analysis_fields)
+            writer.writeheader()
+
+    def _append_runtime_analysis(
+        self,
+        phase,
+        timings,
+        iteration=None,
+        frame_tstamp=None,
+        num_viewpoints=None,
+        optimize_sem=None,
+    ):
+        """Append one timing record to disk and update the aggregate summary."""
+        row = {
+            "phase": phase,
+            "iteration": "" if iteration is None else int(iteration),
+            "frame_tstamp": "" if frame_tstamp is None else int(frame_tstamp),
+            "num_viewpoints": "" if num_viewpoints is None else int(num_viewpoints),
+            "optimize_sem": "" if optimize_sem is None else bool(optimize_sem),
+        }
+        for key in self.runtime_analysis_fields[5:]:
+            value = timings.get(key)
+            row[key] = "" if value is None else float(value)
+
+        with open(self.runtime_analysis_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.runtime_analysis_fields)
+            writer.writerow(row)
+
+        phase_summary = self.runtime_summary.setdefault(phase, {})
+        for key, value in timings.items():
+            if value is None:
+                continue
+            stats = phase_summary.setdefault(
+                key,
+                {"count": 0, "total_s": 0.0, "min_s": None, "max_s": 0.0},
+            )
+            stats["count"] += 1
+            stats["total_s"] += float(value)
+            stats["min_s"] = (
+                float(value)
+                if stats["min_s"] is None
+                else min(stats["min_s"], float(value))
+            )
+            stats["max_s"] = max(stats["max_s"], float(value))
+
+    def _write_runtime_summary(self):
+        """Write aggregate runtime statistics to ``save_dir``."""
+        serializable_summary = {}
+        for phase, metrics in self.runtime_summary.items():
+            serializable_summary[phase] = {}
+            for metric, stats in metrics.items():
+                count = stats["count"]
+                serializable_summary[phase][metric] = {
+                    **stats,
+                    "avg_s": (stats["total_s"] / count) if count else 0.0,
+                }
+
+        with open(self.runtime_summary_path, "w", encoding="utf-8") as f:
+            json.dump(serializable_summary, f, indent=2)
 
     def _log_scalar(self, tag, value, step):
         """Write a scalar to TensorBoard if a writer is available."""
@@ -382,6 +473,7 @@ class GSBackEnd(mp.Process):
                 self.gaussians._rotation[:] = rot.data
 
         # Register new viewpoints and initialise the map on the very first frame
+        viewpoint = None
         w2c = SE3(packet["poses"]).matrix().cuda()
         for i, _ in enumerate(packet["viz_idx"]):
             idx = packet["tstamp"][i].item()
@@ -420,7 +512,7 @@ class GSBackEnd(mp.Process):
 
         self.map(self.current_window, iters=self.opt_params.iteration_per_scene)
 
-        if self.use_gui:
+        if self.use_gui and viewpoint is not None:
             self._push_gui_update(viewpoint)
 
     def finalize(self):
@@ -430,6 +522,7 @@ class GSBackEnd(mp.Process):
         self.gaussians.save_ply(f"{self.save_dir}/3dgs_final.ply")
         torch.save(self.predictor.state_dict(),
                    f"{self.save_dir}/predictor.pth")
+        self._write_runtime_summary()
 
         poses_cw = []
         for view in self.viewpoints.values():
@@ -473,14 +566,20 @@ class GSBackEnd(mp.Process):
 
     def initialize_map(self, cur_frame_idx, viewpoint):
         """Optimise Gaussians on the first frame until convergence."""
+        pkg = None
         for mapping_iteration in (pbar := trange(self.init_itr_num)):
             self.iteration_count += 1
+            iter_start = time.perf_counter()
 
+            render_start = time.perf_counter()
             pkg = self._render(viewpoint)
+            rendering_scene_s = time.perf_counter() - render_start
+
             image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
                 self._unpack_render_pkg(pkg)
             )
 
+            loss_start = time.perf_counter()
             loss = get_loss_mapping_rgbd(self.config, image, depth, viewpoint)
 
             # Add semantic losses after a warm-up period
@@ -488,10 +587,16 @@ class GSBackEnd(mp.Process):
                 self.iteration_count > self.optimize_ins_feats_step
                 and self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0
             )
+            reading_masks_s = 0.0
+            sem_masks = None
+            s_loss = ins_feat.new_zeros(())
+            c_loss = None
             if optimize_sem:
+                mask_start = time.perf_counter()
                 sam_masks, sem_masks, _sem_ids = self._load_semantic_masks(
                     viewpoint.tstamp
                 )
+                reading_masks_s = time.perf_counter() - mask_start
                 if self._has_valid_masks(sam_masks):
                     sam_feat_mean = mask_feature_mean(ins_feat, sam_masks)
                     s_loss = separation_loss(sam_feat_mean)
@@ -505,6 +610,7 @@ class GSBackEnd(mp.Process):
                 else:
                     s_loss = ins_feat.new_zeros(())
                     c_loss = None
+            calculating_loss_s = time.perf_counter() - loss_start
 
             # Logging
             self._log_scalar("InitLoss/loss_init",
@@ -513,7 +619,7 @@ class GSBackEnd(mp.Process):
                 self._log_scalar(
                     "InitLoss/separation_loss", s_loss.item(), self.iteration_count
                 )
-                if sem_masks is not None:
+                if c_loss is not None:
                     self._log_scalar(
                         "InitLoss/cohesion_loss", c_loss.item(), self.iteration_count
                     )
@@ -525,8 +631,11 @@ class GSBackEnd(mp.Process):
                     "InitLoss/RGB_Image", image, self.iteration_count
                 )
 
+            backprop_start = time.perf_counter()
             loss.backward()
+            backpropagation_s = time.perf_counter() - backprop_start
 
+            optimizer_start = time.perf_counter()
             with torch.no_grad():
                 self.gaussians.max_radii2D[vis_filter] = torch.max(
                     self.gaussians.max_radii2D[vis_filter], radii[vis_filter]
@@ -547,6 +656,25 @@ class GSBackEnd(mp.Process):
 
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
+            optimizer_step_s = time.perf_counter() - optimizer_start
+
+            total_iteration_s = time.perf_counter() - iter_start
+            self._append_runtime_analysis(
+                "initialize_map",
+                {
+                    "rendering_scene_s": rendering_scene_s,
+                    "reading_masks_s": reading_masks_s,
+                    "calculating_loss_s": calculating_loss_s,
+                    "backpropagation_s": backpropagation_s,
+                    "optimizer_step_s": optimizer_step_s,
+                    "adaptive_control_s": None,
+                    "total_iteration_s": total_iteration_s,
+                },
+                iteration=self.iteration_count,
+                frame_tstamp=viewpoint.tstamp,
+                num_viewpoints=1,
+                optimize_sem=optimize_sem,
+            )
 
             pbar.set_description(f"Init GS loss {loss.item():.3f}")
 
@@ -568,13 +696,31 @@ class GSBackEnd(mp.Process):
         # for all *iters* iterations.  Random extra viewpoints change every iteration
         # so they are loaded on-demand (still hitting the CPU cache, no HDD reads).
         # After the loop the dict is deleted so GPU memory is reclaimed immediately.
+        preload_start = time.perf_counter()
         window_gpu_masks: dict = {
             int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
             for vp in window_viewpoints
         }
+        preload_time = time.perf_counter() - preload_start
+        self._append_runtime_analysis(
+            "map_mask_preload",
+            {
+                "rendering_scene_s": 0.0,
+                "reading_masks_s": preload_time,
+                "calculating_loss_s": 0.0,
+                "backpropagation_s": 0.0,
+                "optimizer_step_s": 0.0,
+                "adaptive_control_s": 0.0,
+                "total_iteration_s": preload_time,
+            },
+            iteration=self.iteration_count,
+            num_viewpoints=len(window_viewpoints),
+            optimize_sem=True,
+        )
 
         for _ in range(iters):
             self.iteration_count += 1
+            iter_start = time.perf_counter()
             optimize_sem = (
                 self.iteration_count % self.opt_params.ins_feat_optimization_per_step == 0
             )
@@ -584,6 +730,9 @@ class GSBackEnd(mp.Process):
             viewspace_pts_list = []
             vis_filter_list = []
             radii_list = []
+            rendering_scene_s = 0.0
+            reading_masks_s = 0.0
+            calculating_loss_s = 0.0
 
             # Window viewpoints + 2 random extra viewpoints for regularisation
             n_random = min(2, len(extra_viewpoints))
@@ -593,12 +742,15 @@ class GSBackEnd(mp.Process):
             ]
 
             for viewpoint in window_viewpoints + random_vps:
+                render_start = time.perf_counter()
                 pkg = self._render(viewpoint)
+                rendering_scene_s += time.perf_counter() - render_start
                 image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
                     self._unpack_render_pkg(pkg)
                 )
 
                 # Geometry losses
+                loss_start = time.perf_counter()
                 normal_loss = get_loss_normal(depth, viewpoint)
                 rgbd_loss = get_loss_mapping_rgbd(
                     self.config, image, depth, viewpoint)
@@ -609,7 +761,13 @@ class GSBackEnd(mp.Process):
                 )
 
                 # Semantic losses
-                semantic_loss = 0
+                semantic_loss = ins_feat.new_zeros(())
+                feat_losses = {
+                    "s_loss": ins_feat.new_zeros(()),
+                    "c_loss": None,
+                    "r_loss": ins_feat.new_zeros(()),
+                    "p_loss": None,
+                }
                 if optimize_sem:
                     # Use pre-loaded GPU tensors for window viewpoints;
                     # random extra viewpoints are loaded on-demand (CPU cache hit).
@@ -617,9 +775,11 @@ class GSBackEnd(mp.Process):
                     if _key in window_gpu_masks:
                         sam_masks, sem_masks, sem_mask_ids = window_gpu_masks[_key]
                     else:
+                        mask_start = time.perf_counter()
                         sam_masks, sem_masks, sem_mask_ids = self._load_semantic_masks(
                             viewpoint.tstamp
                         )
+                        reading_masks_s += time.perf_counter() - mask_start
                     feat_losses = self._compute_mask_feature_losses(
                         ins_feat, sam_masks, sem_masks, sem_mask_ids
                     )
@@ -627,6 +787,7 @@ class GSBackEnd(mp.Process):
                     loss_mapping = loss_mapping + semantic_loss
                     if feat_losses["p_loss"] is not None:
                         has_p_loss = True
+                calculating_loss_s += time.perf_counter() - loss_start
 
                 # Logging
                 self._log_scalar(
@@ -636,23 +797,27 @@ class GSBackEnd(mp.Process):
                     "Loss/rgbd_loss", rgbd_loss.item(), self.iteration_count
                 )
                 if optimize_sem:
+                    s_loss_value = cast(torch.Tensor, feat_losses["s_loss"])
+                    r_loss_value = cast(torch.Tensor, feat_losses["r_loss"])
+                    c_loss_value = feat_losses["c_loss"]
+                    p_loss_value = feat_losses["p_loss"]
                     self._log_scalar(
                         "Loss/separation_loss",
-                        feat_losses["s_loss"].item(), self.iteration_count,
+                        s_loss_value.item(), self.iteration_count,
                     )
                     self._log_scalar(
                         "Loss/kl_regularization_loss",
-                        feat_losses["r_loss"].item(), self.iteration_count,
+                        r_loss_value.item(), self.iteration_count,
                     )
-                    if feat_losses["c_loss"] is not None:
+                    if c_loss_value is not None:
                         self._log_scalar(
                             "Loss/cohesion_loss",
-                            feat_losses["c_loss"].item(), self.iteration_count,
+                            c_loss_value.item(), self.iteration_count,
                         )
-                    if feat_losses["p_loss"] is not None:
+                    if p_loss_value is not None:
                         self._log_scalar(
                             "Loss/prediction_loss",
-                            feat_losses["p_loss"].item(), self.iteration_count,
+                            p_loss_value.item(), self.iteration_count,
                         )
                     self._log_scalar(
                         "Loss/semantic_loss",
@@ -679,14 +844,20 @@ class GSBackEnd(mp.Process):
             )
             loss_mapping = loss_mapping + 10 * isotropic_loss.mean()
 
+            backprop_start = time.perf_counter()
             loss_mapping.backward()
+            backpropagation_s = time.perf_counter() - backprop_start
 
             # Step predictor if prediction loss was computed
+            optimizer_step_s = 0.0
             if has_p_loss:
+                predictor_step_start = time.perf_counter()
                 self.predictor_optimizer.step()
                 self.predictor_optimizer.zero_grad(set_to_none=True)
+                optimizer_step_s += time.perf_counter() - predictor_step_start
 
             # Gaussian adaptive control
+            adaptive_start = time.perf_counter()
             with torch.no_grad():
                 self._update_densification_stats(
                     viewspace_pts_list, vis_filter_list, radii_list
@@ -707,8 +878,28 @@ class GSBackEnd(mp.Process):
                     Log("Resetting the opacity of non-visible Gaussians")
                     self.gaussians.reset_opacity_nonvisible(vis_filter_list)
 
+                gaussian_step_start = time.perf_counter()
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
+                optimizer_step_s += time.perf_counter() - gaussian_step_start
+            adaptive_control_s = time.perf_counter() - adaptive_start
+
+            total_iteration_s = time.perf_counter() - iter_start
+            self._append_runtime_analysis(
+                "map",
+                {
+                    "rendering_scene_s": rendering_scene_s,
+                    "reading_masks_s": reading_masks_s,
+                    "calculating_loss_s": calculating_loss_s,
+                    "backpropagation_s": backpropagation_s,
+                    "optimizer_step_s": optimizer_step_s,
+                    "adaptive_control_s": adaptive_control_s,
+                    "total_iteration_s": total_iteration_s,
+                },
+                iteration=self.iteration_count,
+                num_viewpoints=len(window_viewpoints) + len(random_vps),
+                optimize_sem=optimize_sem,
+            )
 
         # Release GPU mask tensors now that all iterations are done.
         del window_gpu_masks
@@ -765,18 +956,37 @@ class GSBackEnd(mp.Process):
         # keyframe's masks onto GPU once and keep them resident for the whole loop.
         # CPU cache was already warmed by add_next_kf, so this is pure PCIe copy,
         # no HDD I/O.  The dict is deleted immediately after the loop.
+        preload_start = time.perf_counter()
         all_gpu_masks: dict = {
             int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
             for vp in self.viewpoints.values()
         }
+        preload_time = time.perf_counter() - preload_start
+        self._append_runtime_analysis(
+            "gs_refinement_mask_preload",
+            {
+                "rendering_scene_s": 0.0,
+                "reading_masks_s": preload_time,
+                "calculating_loss_s": 0.0,
+                "backpropagation_s": 0.0,
+                "optimizer_step_s": 0.0,
+                "adaptive_control_s": 0.0,
+                "total_iteration_s": preload_time,
+            },
+            num_viewpoints=len(self.viewpoints),
+            optimize_sem=True,
+        )
 
         for iteration in (pbar := trange(1, iteration_total + 1)):
+            iter_start = time.perf_counter()
             # Sample a random keyframe
             viewpoint_cam = self.viewpoints[
                 random.choice(list(self.viewpoints.keys()))
             ]
 
+            render_start = time.perf_counter()
             pkg = self._render(viewpoint_cam)
+            rendering_scene_s = time.perf_counter() - render_start
             image, _, _, _, depth, _, ins_feat = self._unpack_render_pkg(pkg)
 
             # Exposure compensation
@@ -788,6 +998,7 @@ class GSBackEnd(mp.Process):
                 viewpoint_cam.tstamp)]
 
             # Colour losses
+            loss_start = time.perf_counter()
             gt_image = viewpoint_cam.original_image.cuda()
             l1_color = l1_loss(image, gt_image)
             ssim_l = 1.0 - ssim(image, gt_image)
@@ -811,6 +1022,12 @@ class GSBackEnd(mp.Process):
                 iteration % self.opt_params.ins_feat_optimization_per_step == 0
             )
             p_loss = None
+            feat_losses = {
+                "s_loss": ins_feat.new_zeros(()),
+                "c_loss": None,
+                "r_loss": ins_feat.new_zeros(()),
+                "p_loss": None,
+            }
             if optimize_sem:
                 feat_losses = self._compute_mask_feature_losses(
                     ins_feat, sam_masks, sem_masks, sem_mask_ids
@@ -818,6 +1035,7 @@ class GSBackEnd(mp.Process):
                 semantic_loss = self._accumulate_semantic_loss(feat_losses)
                 loss = loss + semantic_loss
                 p_loss = feat_losses["p_loss"]
+            calculating_loss_s = time.perf_counter() - loss_start
 
             # Logging
             self._log_scalar("Refinement_Loss/color_refinement",
@@ -829,18 +1047,21 @@ class GSBackEnd(mp.Process):
             self._log_scalar("Refinement_Loss/rgb_mapping_loss",
                              rgb_mapping_loss.item(), iteration)
             if optimize_sem:
+                s_loss_value = cast(torch.Tensor, feat_losses["s_loss"])
+                r_loss_value = cast(torch.Tensor, feat_losses["r_loss"])
+                c_loss_value = feat_losses["c_loss"]
                 self._log_scalar(
                     "Refinement_Loss/separation_loss",
-                    feat_losses["s_loss"].item(), iteration,
+                    s_loss_value.item(), iteration,
                 )
                 self._log_scalar(
                     "Refinement_Loss/kl_regularization_loss",
-                    feat_losses["r_loss"].item(), iteration,
+                    r_loss_value.item(), iteration,
                 )
-                if feat_losses["c_loss"] is not None:
+                if c_loss_value is not None:
                     self._log_scalar(
                         "Refinement_Loss/cohesion_loss",
-                        feat_losses["c_loss"].item(), iteration,
+                        c_loss_value.item(), iteration,
                     )
             if p_loss is not None:
                 self._log_scalar(
@@ -853,18 +1074,26 @@ class GSBackEnd(mp.Process):
                 self.log_rgb_images(
                     "Refinement_Loss/RGB_Image", image, iteration)
 
+            backprop_start = time.perf_counter()
             loss.backward()
+            backpropagation_s = time.perf_counter() - backprop_start
 
             # Step predictor from prediction loss
+            optimizer_step_s = 0.0
             if p_loss is not None:
+                predictor_step_start = time.perf_counter()
                 self.predictor_optimizer.step()
                 self.predictor_optimizer.zero_grad(set_to_none=True)
+                optimizer_step_s += time.perf_counter() - predictor_step_start
                 if iteration % 100 == 0:
                     self.predictor_scheduler.step()
 
+            adaptive_start = time.perf_counter()
             with torch.no_grad():
+                gaussian_step_start = time.perf_counter()
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
+                optimizer_step_s += time.perf_counter() - gaussian_step_start
                 lr = self.gaussians.update_learning_rate(iteration)
 
                 update_gaussian = (
@@ -878,15 +1107,36 @@ class GSBackEnd(mp.Process):
                         self.size_threshold,
                     )
 
+                pose_step_start = time.perf_counter()
                 self.keyframe_optimizers.step()
                 self.keyframe_optimizers.zero_grad(set_to_none=True)
                 update_pose(viewpoint_cam)
+                optimizer_step_s += time.perf_counter() - pose_step_start
+            adaptive_control_s = time.perf_counter() - adaptive_start
 
             if self.use_gui and iteration % 50 == 0:
                 self.q_main2vis.put(
                     gui_utils.GaussianPacket(
                         gaussians=clone_obj(self.gaussians))
                 )
+
+            total_iteration_s = time.perf_counter() - iter_start
+            self._append_runtime_analysis(
+                "gs_refinement",
+                {
+                    "rendering_scene_s": rendering_scene_s,
+                    "reading_masks_s": 0.0,
+                    "calculating_loss_s": calculating_loss_s,
+                    "backpropagation_s": backpropagation_s,
+                    "optimizer_step_s": optimizer_step_s,
+                    "adaptive_control_s": adaptive_control_s,
+                    "total_iteration_s": total_iteration_s,
+                },
+                iteration=iteration,
+                frame_tstamp=viewpoint_cam.tstamp,
+                num_viewpoints=1,
+                optimize_sem=optimize_sem,
+            )
 
             pbar.set_description(
                 f"Global GS Refinement lr {lr:.3E} loss {loss.item():.3f}"
@@ -899,38 +1149,86 @@ class GSBackEnd(mp.Process):
         """Predictor-only fine-tuning loop with Gaussian parameters frozen."""
         pending_losses = []
         for iteration in (pbar := trange(1, iteration_total + 1)):
+            iter_start = time.perf_counter()
             viewpoint_cam = self.viewpoints[
                 random.choice(list(self.viewpoints.keys()))
             ]
+            mask_start = time.perf_counter()
             _, sem_masks, sem_mask_ids = self._load_semantic_masks(
                 viewpoint_cam.tstamp)
+            reading_masks_s = time.perf_counter() - mask_start
 
             if sem_mask_ids is None or sem_masks is None:
+                self._append_runtime_analysis(
+                    "predictor_training",
+                    {
+                        "rendering_scene_s": 0.0,
+                        "reading_masks_s": reading_masks_s,
+                        "calculating_loss_s": 0.0,
+                        "backpropagation_s": 0.0,
+                        "optimizer_step_s": 0.0,
+                        "adaptive_control_s": 0.0,
+                        "total_iteration_s": time.perf_counter() - iter_start,
+                    },
+                    iteration=iteration,
+                    frame_tstamp=viewpoint_cam.tstamp,
+                    num_viewpoints=1,
+                    optimize_sem=True,
+                )
                 continue
 
+            render_start = time.perf_counter()
             ins_feat = self._render(viewpoint_cam)["rendered_features"]
+            rendering_scene_s = time.perf_counter() - render_start
+
+            loss_start = time.perf_counter()
             sem_feat_mean = mask_feature_mean(ins_feat, sem_masks)
 
             # Detach so gradients only update the predictor head
             predictions = self.predictor(sem_feat_mean.clone().detach())
             p_loss = prediction_loss(predictions, sem_mask_ids)
             pending_losses.append(p_loss)
+            calculating_loss_s = time.perf_counter() - loss_start
 
             self._log_scalar("Prediction_head/prediction_loss",
                              p_loss.item(), iteration)
             if iteration % 100 == 0:
                 self.predictor_scheduler.step()
 
+            backpropagation_s = 0.0
+            optimizer_step_s = 0.0
             if pending_losses:
-                total_p_loss = sum(pending_losses)
+                total_p_loss = torch.stack(pending_losses).sum()
+                backprop_start = time.perf_counter()
                 total_p_loss.backward()
+                backpropagation_s = time.perf_counter() - backprop_start
+                optimizer_start = time.perf_counter()
                 self.predictor_optimizer.step()
                 self.predictor_optimizer.zero_grad(set_to_none=True)
+                optimizer_step_s = time.perf_counter() - optimizer_start
                 pending_losses = []
                 pbar.set_description(
                     f"Prediction head lr {self.predictor_scheduler.get_last_lr()[0]:.3E}"
                     f" loss {total_p_loss.item():.3f}"
                 )
+
+            total_iteration_s = time.perf_counter() - iter_start
+            self._append_runtime_analysis(
+                "predictor_training",
+                {
+                    "rendering_scene_s": rendering_scene_s,
+                    "reading_masks_s": reading_masks_s,
+                    "calculating_loss_s": calculating_loss_s,
+                    "backpropagation_s": backpropagation_s,
+                    "optimizer_step_s": optimizer_step_s,
+                    "adaptive_control_s": 0.0,
+                    "total_iteration_s": total_iteration_s,
+                },
+                iteration=iteration,
+                frame_tstamp=viewpoint_cam.tstamp,
+                num_viewpoints=1,
+                optimize_sem=True,
+            )
 
     def _finalize_segmentation(self):
         """Cluster Gaussians by instance feature and assign class labels."""
