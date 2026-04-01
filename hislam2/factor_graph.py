@@ -4,8 +4,8 @@ import numpy as np
 
 from tqdm import trange
 from lietorch import SE3
-from modules.corr import CorrBlock, AltCorrBlock
-import geom.projective_ops as pops
+from hislam2.modules.corr import CorrBlock, AltCorrBlock
+import hislam2.geom.projective_ops as pops
 
 
 class FactorGraph:
@@ -28,15 +28,19 @@ class FactorGraph:
         self.corr, self.net, self.inp = None, None, None
         self.damping = 1e-6 * torch.ones_like(self.video.disps)
 
-        self.target = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
-        self.weight = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.target = torch.zeros(
+            [1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.weight = torch.zeros(
+            [1, 0, ht, wd, 2], device=device, dtype=torch.float)
 
         # inactive factors
         self.ii_inac = torch.as_tensor([], dtype=torch.long, device=device)
         self.jj_inac = torch.as_tensor([], dtype=torch.long, device=device)
 
-        self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
-        self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.target_inac = torch.zeros(
+            [1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.weight_inac = torch.zeros(
+            [1, 0, ht, wd, 2], device=device, dtype=torch.float)
 
     def __filter_repeated_edges(self, ii, jj):
         """ remove duplicate edges """
@@ -59,7 +63,7 @@ class FactorGraph:
         ii = ii[ix]
         jj = jj[ix]
 
-        w = torch.mean(self.weight, dim=[0,2,3,4]).cpu().numpy()
+        w = torch.mean(self.weight, dim=[0, 2, 3, 4]).cpu().numpy()
         w = w[ix]
         for e in zip(ii, jj, w):
             print(e)
@@ -83,14 +87,13 @@ class FactorGraph:
         # remove duplicate edges
         ii, jj = self.__filter_repeated_edges(ii, jj)
 
-
         if ii.shape[0] == 0:
             return
 
         # place limit on number of factors
         if self.max_factors > 0 and self.ii.shape[0] + ii.shape[0] > self.max_factors \
                 and self.corr is not None and remove:
-            
+
             ix = torch.arange(len(self.age))[torch.argsort(self.age).cpu()]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
@@ -99,13 +102,14 @@ class FactorGraph:
         # correlation volume for new edges
         if self.corr_impl == "volume":
             c = (ii == jj).long()
-            fmap1 = self.video.fmaps[ii,0].to(self.device).unsqueeze(0)
-            fmap2 = self.video.fmaps[jj,c].to(self.device).unsqueeze(0)
+            fmap1 = self.video.fmaps[ii, 0].to(self.device).unsqueeze(0)
+            fmap2 = self.video.fmaps[jj, c].to(self.device).unsqueeze(0)
             corr = CorrBlock(fmap1, fmap2)
             self.corr = corr if self.corr is None else self.corr.cat(corr)
 
             inp = self.video.inps[ii].to(self.device).unsqueeze(0)
-            self.inp = inp if self.inp is None else torch.cat([self.inp, inp], 1)
+            self.inp = inp if self.inp is None else torch.cat(
+                [self.inp, inp], 1)
 
         with torch.cuda.amp.autocast(enabled=False):
             target, _ = self.video.reproject(ii, jj)
@@ -128,28 +132,30 @@ class FactorGraph:
         # store estimated factors
         if store:
             if hasattr(self.video, 'pgobuf'):
-                self.video.pgobuf.add_rel_poses(self.ii[mask], self.jj[mask], self.target[:,mask], self.weight[:,mask])
+                self.video.pgobuf.add_rel_poses(
+                    self.ii[mask], self.jj[mask], self.target[:, mask], self.weight[:, mask])
             self.ii_inac = torch.cat([self.ii_inac, self.ii[mask]], 0)
             self.jj_inac = torch.cat([self.jj_inac, self.jj[mask]], 0)
-            self.target_inac = torch.cat([self.target_inac, self.target[:,mask]], 1)
-            self.weight_inac = torch.cat([self.weight_inac, self.weight[:,mask]], 1)
+            self.target_inac = torch.cat(
+                [self.target_inac, self.target[:, mask]], 1)
+            self.weight_inac = torch.cat(
+                [self.weight_inac, self.weight[:, mask]], 1)
 
         self.ii = self.ii[~mask]
         self.jj = self.jj[~mask]
         self.age = self.age[~mask]
-        
+
         if self.corr_impl == "volume":
             self.corr = self.corr[~mask]
 
         if self.net is not None:
-            self.net = self.net[:,~mask]
+            self.net = self.net[:, ~mask]
 
         if self.inp is not None:
-            self.inp = self.inp[:,~mask]
+            self.inp = self.inp[:, ~mask]
 
-        self.target = self.target[:,~mask]
-        self.weight = self.weight[:,~mask]
-
+        self.target = self.target[:, ~mask]
+        self.weight = self.weight[:, ~mask]
 
     @torch.cuda.amp.autocast(enabled=True)
     def rm_keyframe(self, ix):
@@ -176,15 +182,14 @@ class FactorGraph:
         if torch.any(m):
             self.ii_inac = self.ii_inac[~m]
             self.jj_inac = self.jj_inac[~m]
-            self.target_inac = self.target_inac[:,~m]
-            self.weight_inac = self.weight_inac[:,~m]
+            self.target_inac = self.target_inac[:, ~m]
+            self.weight_inac = self.weight_inac[:, ~m]
 
         m = (self.ii == ix) | (self.jj == ix)
 
         self.ii[self.ii >= ix] -= 1
         self.jj[self.jj >= ix] -= 1
         self.rm_factors(m, store=False)
-
 
     @torch.cuda.amp.autocast(enabled=True)
     def update(self, t0=None, t1=None, itrs=2, use_inactive=False, EP=1e-7, motion_only=False, use_mono=False):
@@ -193,9 +198,10 @@ class FactorGraph:
         # motion features
         with torch.cuda.amp.autocast(enabled=False):
             coords1, mask = self.video.reproject(self.ii, self.jj)
-            motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
-            motn = motn.permute(0,1,4,2,3).clamp(-64.0, 64.0)
-        
+            motn = torch.cat(
+                [coords1 - self.coords0, self.target - coords1], dim=-1)
+            motn = motn.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
+
         # correlation features
         corr = self.corr(coords1)
 
@@ -215,23 +221,21 @@ class FactorGraph:
                 m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
                 ii = torch.cat([self.ii_inac[m], self.ii], 0)
                 jj = torch.cat([self.jj_inac[m], self.jj], 0)
-                target = torch.cat([self.target_inac[:,m], self.target], 1)
-                weight = torch.cat([self.weight_inac[:,m], self.weight], 1)
+                target = torch.cat([self.target_inac[:, m], self.target], 1)
+                weight = torch.cat([self.weight_inac[:, m], self.weight], 1)
 
             else:
                 ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
 
-
             damping = .2 * self.damping[torch.unique(ii)].contiguous() + EP
 
             # dense bundle adjustment
-            self.video.cuda_ba(target, weight, damping, ii, jj, t0, t1, 
-                itrs=itrs, lm=1e-4, ep=0.1, motion_only=motion_only, use_mono=use_mono)
+            self.video.cuda_ba(target, weight, damping, ii, jj, t0, t1,
+                               itrs=itrs, lm=1e-4, ep=0.1, motion_only=motion_only, use_mono=use_mono)
 
             self.video.upsample(torch.unique(self.ii), upmask)
 
         self.age += 1
-
 
     @torch.cuda.amp.autocast(enabled=False)
     def update_lowmem(self, t0=None, t1=None, itrs=2, use_inactive=False, EP=1e-7, steps=8):
@@ -244,11 +248,13 @@ class FactorGraph:
         corr_op = AltCorrBlock(self.video.fmaps.view(1, num*rig, ch, ht, wd))
 
         for step in (pbar := trange(steps)):
-            pbar.set_description(f"Global BA Iteration #{step+1} with {t} keyframes {len(self.ii)} edges")
+            pbar.set_description(
+                f"Global BA Iteration #{step+1} with {t} keyframes {len(self.ii)} edges")
             with torch.cuda.amp.autocast(enabled=False):
                 coords1, mask = self.video.reproject(self.ii, self.jj)
-                motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
-                motn = motn.permute(0,1,4,2,3).clamp(-64.0, 64.0)
+                motn = torch.cat(
+                    [coords1 - self.coords0, self.target - coords1], dim=-1)
+                motn = motn.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
             s = 2
             for i in range(0, self.jj.max()+1, s):
@@ -257,25 +263,28 @@ class FactorGraph:
                 jjs = self.jj[v]
 
                 ht, wd = self.coords0.shape[0:2]
-                corr1 = corr_op(coords1[:,v], rig * iis, rig * jjs + (iis == jjs).long())
+                corr1 = corr_op(coords1[:, v], rig * iis,
+                                rig * jjs + (iis == jjs).long())
 
                 with torch.cuda.amp.autocast(enabled=True):
-                 
+
                     net, delta, weight, damping, upmask = \
-                        self.update_op(self.net[:,v], self.video.inps[None,iis], corr1, motn[:,v], iis, jjs)
+                        self.update_op(
+                            self.net[:, v], self.video.inps[None, iis], corr1, motn[:, v], iis, jjs)
 
                     self.video.upsample(torch.unique(iis), upmask)
 
-                self.net[:,v] = net
-                self.target[:,v] = coords1[:,v] + delta.float()
-                self.weight[:,v] = weight.float()
+                self.net[:, v] = net
+                self.target[:, v] = coords1[:, v] + delta.float()
+                self.weight[:, v] = weight.float()
                 self.damping[torch.unique(iis)] = damping
 
-            damping = .2 * self.damping[torch.unique(self.ii)].contiguous() + EP
+            damping = .2 * \
+                self.damping[torch.unique(self.ii)].contiguous() + EP
 
             # dense bundle adjustment
-            self.video.cuda_ba(self.target, self.weight, damping, self.ii, self.jj, 10, t, 
-                itrs=itrs, lm=1e-5, ep=1e-2, motion_only=False, use_mono=False)
+            self.video.cuda_ba(self.target, self.weight, damping, self.ii, self.jj, 10, t,
+                               itrs=itrs, lm=1e-5, ep=1e-2, motion_only=False, use_mono=False)
 
             self.video.dirty[:t] = True
 
@@ -289,14 +298,17 @@ class FactorGraph:
 
         for step in range(steps):
             with torch.cuda.amp.autocast(enabled=False):
-                coords1, mask = self.video.reproject(self.ii, self.jj, sim3=True)
-                motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
-                motn = motn.permute(0,1,4,2,3).clamp(-64.0, 64.0)
+                coords1, mask = self.video.reproject(
+                    self.ii, self.jj, sim3=True)
+                motn = torch.cat(
+                    [coords1 - self.coords0, self.target - coords1], dim=-1)
+                motn = motn.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
             # correlation features
             corr = self.corr(coords1)
             self.net, delta, weight, damping, upmask = \
-                self.update_op(self.net, self.inp, corr, motn, self.ii, self.jj)
+                self.update_op(self.net, self.inp, corr,
+                               motn, self.ii, self.jj)
 
             with torch.cuda.amp.autocast(enabled=False):
                 self.target = coords1 + delta.to(dtype=torch.float)
@@ -307,15 +319,18 @@ class FactorGraph:
                 jj = torch.cat([self.jj_inac, self.jj], 0)
                 target = torch.cat([self.target_inac, self.target], 1)
                 weight = torch.cat([self.weight_inac, self.weight], 1)
-                damping = .2 * self.damping[torch.unique(torch.cat((torch.arange(t0, t1, device='cuda'), ii)))].contiguous() + EP
+                damping = .2 * self.damping[torch.unique(
+                    torch.cat((torch.arange(t0, t1, device='cuda'), ii)))].contiguous() + EP
 
-                self.video.cuda_pgba(target, weight, damping, ii, jj, t0, t1, itrs=itrs, lm=1e-5, ep=1e-3)
+                self.video.cuda_pgba(
+                    target, weight, damping, ii, jj, t0, t1, itrs=itrs, lm=1e-5, ep=1e-3)
 
-        self.video.poses[:t1] = self.video.poses_sim3[:t1,:7]
-        self.video.poses[:t1,:3] /= self.video.poses_sim3[:t1,-1:]
-        self.video.pgobuf.rel_poses[:self.video.pgobuf.rel_N.value,:3] /= self.video.poses_sim3[self.video.pgobuf.rel_ii[:self.video.pgobuf.rel_N.value],-1:].cpu()
+        self.video.poses[:t1] = self.video.poses_sim3[:t1, :7]
+        self.video.poses[:t1, :3] /= self.video.poses_sim3[:t1, -1:]
+        self.video.pgobuf.rel_poses[:self.video.pgobuf.rel_N.value,
+                                    :3] /= self.video.poses_sim3[self.video.pgobuf.rel_ii[:self.video.pgobuf.rel_N.value], -1:].cpu()
 
-        ss = self.video.poses_sim3[:t1,-1:,None]
+        ss = self.video.poses_sim3[:t1, -1:, None]
         self.video.disps[:t1] *= ss
         self.video.disps_up[:t1] *= ss.cpu()
         self.video.dscales[:t1] *= ss
@@ -324,14 +339,14 @@ class FactorGraph:
     def add_neighborhood_factors(self, t0, t1, r=3):
         """ add edges between neighboring frames within radius r """
 
-        ii, jj = torch.meshgrid(torch.arange(t0,t1), torch.arange(t0,t1), indexing='ij')
+        ii, jj = torch.meshgrid(torch.arange(
+            t0, t1), torch.arange(t0, t1), indexing='ij')
         ii = ii.reshape(-1).to(dtype=torch.long, device=self.device)
         jj = jj.reshape(-1).to(dtype=torch.long, device=self.device)
 
         keep = ((ii - jj).abs() > 0) & ((ii - jj).abs() <= r)
         self.add_factors(ii[keep], jj[keep])
 
-    
     def add_proximity_factors(self, t0=0, t1=0, rad=2, nms=2, beta=0.3, thresh=16.0, remove=False, backend=False):
         """ add edges to the factor graph based on distance """
 
@@ -359,12 +374,11 @@ class FactorGraph:
                         if (t0 <= i1 < t) and (t1 <= j1 < t):
                             d[(i1-t0)*(t-t1) + (j1-t1)] = np.inf
 
-
         es = []
         for i in range(t0, t):
-            for j in range(max(i-rad-1,0), i):
-                es.append((i,j))
-                es.append((j,i))
+            for j in range(max(i-rad-1, 0), i):
+                es.append((i, j))
+                es.append((j, i))
                 d[(i-t0)*(t-t1) + (j-t1)] = np.inf
 
         if backend:
@@ -372,8 +386,10 @@ class FactorGraph:
             iii = ii[d.cpu() < thresh]
             jjj = jj[d.cpu() < thresh]
             if len(iii) > 0:
-                Gij = (SE3(self.video.poses[jjj]) * SE3(self.video.poses[iii]).inv()).data
-                euls = R.from_quat(Gij[:, 3:].cpu().numpy()).as_euler('zxy', degrees=True)
+                Gij = (SE3(self.video.poses[jjj]) *
+                       SE3(self.video.poses[iii]).inv()).data
+                euls = R.from_quat(Gij[:, 3:].cpu().numpy()).as_euler(
+                    'zxy', degrees=True)
                 oris = np.linalg.norm(euls, axis=1)
                 d[d < thresh][oris > 150] = np.inf
 
@@ -387,7 +403,7 @@ class FactorGraph:
 
             i = ii[k]
             j = jj[k]
-            
+
             # bidirectional
             es.append((i, j))
             es.append((j, i))

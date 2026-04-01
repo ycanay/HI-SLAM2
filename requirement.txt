@@ -16,3 +16,4 @@ plyfile
 rich
 glfw
 glm
+git+https://github.com/leonardodalinky/pytorch_fpsample

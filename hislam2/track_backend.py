@@ -1,5 +1,5 @@
 import torch
-from factor_graph import FactorGraph
+from hislam2.factor_graph import FactorGraph
 
 
 class TrackBackend:
@@ -17,9 +17,10 @@ class TrackBackend:
         torch.cuda.empty_cache()
 
         t = self.video.counter.value
-        graph = FactorGraph(self.video, self.update_op, corr_impl="alt", max_factors=min(1e4, 20*t))
-        graph.add_proximity_factors(rad=self.backend_radius, 
-                                    nms=self.backend_nms, 
+        graph = FactorGraph(self.video, self.update_op,
+                            corr_impl="alt", max_factors=min(1e4, 20*t))
+        graph.add_proximity_factors(rad=self.backend_radius,
+                                    nms=self.backend_nms,
                                     thresh=self.backend_thresh, backend=True)
 
         graph.update_lowmem(steps=steps)

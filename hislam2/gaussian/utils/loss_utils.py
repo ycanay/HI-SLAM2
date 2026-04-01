@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+from hislam2.util.utils import ele_multip_in_chunks
 
 
 def mse(img1, img2):
@@ -60,7 +61,8 @@ def gaussian(window_size, sigma):
 
 def create_window(window_size, channel):
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
-    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    _2D_window = _1D_window.mm(
+        _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
     window = Variable(
         _2D_window.expand(channel, 1, window_size, window_size).contiguous()
     )
@@ -87,10 +89,12 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     mu1_mu2 = mu1 * mu2
 
     sigma1_sq = (
-        F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+        F.conv2d(img1 * img1, window, padding=window_size //
+                 2, groups=channel) - mu1_sq
     )
     sigma2_sq = (
-        F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+        F.conv2d(img2 * img2, window, padding=window_size //
+                 2, groups=channel) - mu2_sq
     )
     sigma12 = (
         F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
@@ -108,3 +112,132 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+
+
+def separation_loss(feat_mean_stack):
+    """ inter-mask contrastive loss Eq.(2) in the paper
+    Constrain the instance features within different masks to be as far apart as possible.
+    """
+    N, _ = feat_mean_stack.shape
+
+    # expand feat_mean_stack[N, 6] to [N, N, 6]
+    feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
+    feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
+
+    # distance
+    diff_squared = (feat_expanded - feat_transposed).pow(2).sum(2)
+
+    # Calculate the inverse of the distance to enhance discrimination
+    epsilon = 1     # 1e-6
+    inverse_distance = 1.0 / (diff_squared + epsilon)
+    # Exclude diagonal elements (distance from itself) and calculate the mean inverse distance
+    mask = torch.eye(N, device=feat_mean_stack.device).bool()
+    inverse_distance.masked_fill_(mask, 0)
+
+    # note: weight
+    # sorted by distance
+    sorted_indices = inverse_distance.argsort().argsort()
+    loss_weight = (sorted_indices.float() / (N - 1)) * \
+        (1.0 - 0.1) + 0.1    # scale to 0.1 - 1.0, [N, N]
+    # small weight
+    inverse_distance *= loss_weight     # [N, N]
+
+    # final loss
+    loss = inverse_distance.sum() / (N * (N - 1))
+
+    return loss
+
+
+def cohesion_loss(gt_masks, feat_map, feature_mean):
+    """
+    Computes cohesion loss using externally provided per-mask mean features.
+
+    Args:
+        gt_masks (Tensor): [num_masks, H1, W1] boolean instance masks
+        feat_map (Tensor): [6, H, W] feature map with 6 channels
+        feature_mean (Tensor): [num_masks, 6] mean features for each mask
+
+    Returns:
+        Tensor: cohesion loss
+    """
+    num_masks, mask_h, mask_w = gt_masks.shape
+    C, H, W = feat_map.shape
+    assert C == 6, "Feature map must have 6 channels."
+
+    # Resize masks if needed
+    if (mask_h, mask_w) != (H, W):
+        gt_masks = torch.nn.functional.interpolate(
+            gt_masks.unsqueeze(1).float(), size=(H, W), mode='nearest')
+        gt_masks = gt_masks.squeeze(1)  # [num_masks, H, W]
+
+    # Expand tensors
+    feat_exp = feat_map.unsqueeze(0).expand(
+        num_masks, -1, -1, -1)       # [num_masks, 6, H, W]
+    # [num_masks, 6, H, W]
+    mask_exp = gt_masks.unsqueeze(1).expand(-1, C, -1, -1)
+
+    # Apply masks to features
+    masked_feats = ele_multip_in_chunks(feat_exp, mask_exp, 2)
+
+    # Expand mean feature per mask to spatial layout
+    mean_feats = feature_mean.unsqueeze(2).unsqueeze(3).expand(-1, -1, H, W)
+    mean_feats_masked = ele_multip_in_chunks(mean_feats, mask_exp, 2)
+
+    # Mean L1 loss between masked features and masked means
+    l1 = (torch.abs(masked_feats - mean_feats_masked)).mean()
+    return l1
+
+
+def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors):
+    """
+    Regularization loss over instance features using KL divergence between softmaxed features.
+
+    Args:
+        ins_feat (Tensor): [N, 6] instance features
+        gaussians (Tensor): [N, 3] positions (used for nearest neighbor search)
+        num_of_samples (int): number of sampled points (m)
+        num_of_neighbors (int): number of nearest neighbors (k)
+
+    Returns:
+        Tensor: scalar regularization loss
+    """
+    N, D = ins_feat.shape
+    device = ins_feat.device
+
+    # Step 1: Sample m indices
+    sample_indices = torch.randperm(N, device=device)[:num_of_samples]  # [m]
+    sampled_pos = gaussians[sample_indices]           # [m, 3]
+    sampled_feat = ins_feat[sample_indices]           # [m, D]
+
+    # Step 2: Compute distances and get k nearest neighbors (excluding self if necessary)
+    dists = torch.cdist(sampled_pos, gaussians)       # [m, N]
+    neighbor_indices = dists.topk(
+        num_of_neighbors, largest=False).indices  # [m, k]
+    neighbor_feats = ins_feat[neighbor_indices]       # [m, k, D]
+
+    # Step 3: Softmax over feature dimension
+    sampled_softmax = F.softmax(
+        sampled_feat, dim=-1).unsqueeze(1)       # [m, 1, D]
+    neighbor_softmax = F.softmax(
+        neighbor_feats, dim=-1)                 # [m, k, D]
+
+    # Step 4: Compute KL divergence: KL(P || Q) = sum P * log(P / Q)
+    eps = 1e-8  # for numerical stability
+    kl_div = sampled_softmax * \
+        torch.log((sampled_softmax + eps) /
+                  (neighbor_softmax + eps))  # [m, k, D]
+    loss = kl_div.sum(dim=-1).mean()  # scalar
+
+    return loss
+
+
+def prediction_loss(pred, target):
+    """ Cross entropy loss for semantic prediction
+
+    Args:
+        pred (Tensor): [N, num_classes] predicted logits
+        target (Tensor): [N] ground truth labels
+    Returns:
+        Tensor: scalar loss
+    """
+    return F.cross_entropy(pred, target)

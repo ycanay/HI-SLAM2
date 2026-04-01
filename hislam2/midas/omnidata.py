@@ -10,8 +10,8 @@ import cv2
 import torch
 from torchvision import transforms
 
-from midas.dpt_depth import DPTDepthModel
-from midas.transforms import Resize
+from hislam2.midas.dpt_depth import DPTDepthModel
+from hislam2.midas.transforms import Resize
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -44,7 +44,8 @@ def colorize(image, cmap="turbo"):
     h, w, c = image.shape
     if c == 1:  # depth
         image = image.squeeze()
-        image_normalized = (image - np.min(image)) / (np.max(image) - np.min(image))
+        image_normalized = (image - np.min(image)) / \
+            (np.max(image) - np.min(image))
         cmap = plt.get_cmap(cmap)
         image_colorized = cmap(image_normalized)[:, :, :3]
         return np.uint8(image_colorized * 255)
@@ -64,14 +65,16 @@ class OmnidataModel:
 
     def __init__(self, task="depth", model_path=None, device="cuda:0"):
         if model_path is None:
-            model_path = Path.cwd() / "pretrained_models" / self.ckpt_dict[task]
+            model_path = Path.cwd() / "pretrained_models" / \
+                self.ckpt_dict[task]
 
         self.model_path = model_path
         self.task = task
         self.channel = self.channel_dict[task]
         self.device = device
 
-        self.model = DPTDepthModel(backbone=self.backbone, num_channels=self.channel)
+        self.model = DPTDepthModel(
+            backbone=self.backbone, num_channels=self.channel)
 
         checkpoint = torch.load(self.model_path, map_location=device)
         assert "state_dict" in checkpoint, "No state_dict found in checkpoint"
@@ -79,7 +82,7 @@ class OmnidataModel:
         state_dict = {}
         for k, v in checkpoint["state_dict"].items():
             # remove the "model." prefix
-            state_dict[k[len("model.") :]] = v
+            state_dict[k[len("model."):]] = v
         self.model.load_state_dict(state_dict)
         self.model.to(device)
 
@@ -203,5 +206,6 @@ if __name__ == "__main__":
         for ext in exts:
             image_fnames += sorted(image_path.glob(f"*{ext}"))
         for image_fname in tqdm(image_fnames):
-            output = omnidata(image_fname, down_factor=args.down_factor, target_size=target_size)
+            output = omnidata(
+                image_fname, down_factor=args.down_factor, target_size=target_size)
             post_prediction(output, image_fname)

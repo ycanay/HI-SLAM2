@@ -1,4 +1,4 @@
-name: hislam2
+name: hislam_2
 channels:
   - rusty1s
   - pytorch
@@ -20,21 +20,22 @@ dependencies:
   - lightning
   - wheel
   - pip
+  - transformers=4.37.2
   - pip:
-    - git+https://github.com/eriksandstroem/evaluate_3d_reconstruction_lib.git
-    - torch-scatter -f https://data.pyg.org/whl/torch-2.1.2+cu118.html
-    - thirdparty/simple-knn
-    - thirdparty/diff-gaussian-rasterization
-    - numpy==1.26.4
-    - setuptools==69.5.1
-    - torchmetrics
-    - pyrender
-    - imgviz
-    - timm
-    - open3d
-    - evo
-    - munch
-    - plyfile
-    - rich
-    - glfw
-    - glm
+      - git+https://github.com/eriksandstroem/evaluate_3d_reconstruction_lib.git
+      - torch-scatter -f https://data.pyg.org/whl/torch-2.1.2+cu118.html
+      - thirdparty/simple-knn
+      - thirdparty/diff-gaussian-rasterization
+      - numpy==1.26.4
+      - setuptools==69.5.1
+      - torchmetrics
+      - pyrender
+      - imgviz
+      - timm
+      - open3d
+      - evo
+      - munch
+      - plyfile
+      - rich
+      - glfw
+      - glm

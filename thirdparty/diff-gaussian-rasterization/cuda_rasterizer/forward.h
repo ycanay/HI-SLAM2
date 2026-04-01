@@ -22,7 +22,7 @@ namespace FORWARD
 {
 	// Perform initial steps for each Gaussian prior to rasterization.
 	void preprocess(int P, int D, int M,
-		const float* means3D,
+		const float* orig_points,
 		const glm::vec3* scales,
 		const float scale_modifier,
 		const glm::vec4* rotations,
@@ -38,16 +38,14 @@ namespace FORWARD
 		const float focal_x, float focal_y,
 		const float tan_fovx, float tan_fovy,
 		int* radii,
-		float2* means2D,
-		float3* view_points,
+		float2* points_xy_image,
 		float* depths,
-		float2* ray_planes,
-		float* ts,
 		float* cov3Ds,
-		float* rgb,
+		float* colors,
 		float4* conic_opacity,
 		const dim3 grid,
-		uint32_t* tiles_touched);
+		uint32_t* tiles_touched,
+		bool prefiltered);
 
 	// Main rasterization method.
 	void render(
@@ -55,20 +53,18 @@ namespace FORWARD
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
-		const float* view_points,
-		const float2* means2D,
-		const float* colors,
-		const float* ts,
-		const float2* ray_planes,
+		const float2* points_xy_image,
+		const float* features,
+		const float* ins_feats,
+		const float* depths,
 		const float4* conic_opacity,
-		const float focal_x, float focal_y,
 		float* out_alpha,
 		uint32_t* n_contrib,
 		const float* bg_color,
+		const float* empty_ins_feats,
 		float* out_color,
-		float* out_depth,
-		float* accum_depth,
-		int* n_touched);
+		float* out_ins_feats,
+		float* out_depth);
 }
 
 

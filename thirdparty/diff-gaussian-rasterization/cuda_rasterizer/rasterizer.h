@@ -21,16 +21,25 @@ namespace CudaRasterizer
 	{
 	public:
 
+		static void markVisible(
+			int P,
+			float* means3D,
+			float* viewmatrix,
+			float* projmatrix,
+			bool* present);
+
 		static int forward(
 			std::function<char* (size_t)> geometryBuffer,
 			std::function<char* (size_t)> binningBuffer,
 			std::function<char* (size_t)> imageBuffer,
 			const int P, int D, int M,
 			const float* background,
+			const float* empty_ins_feats,
 			const int width, int height,
 			const float* means3D,
 			const float* shs,
 			const float* colors_precomp,
+			const float* ins_feats,
 			const float* opacities,
 			const float* scales,
 			const float scale_modifier,
@@ -40,19 +49,23 @@ namespace CudaRasterizer
 			const float* projmatrix,
 			const float* cam_pos,
 			const float tan_fovx, float tan_fovy,
+			const bool prefiltered,
 			float* out_color,
+			float* out_ins_feats,
 			float* out_depth,
 			float* out_alpha,
 			int* radii = nullptr,
-			int* n_touched = nullptr);
+			bool debug = false);
 
 		static void backward(
 			const int P, int D, int M, int R,
 			const float* background,
+			const float* empty_ins_feats,
 			const int width, int height,
 			const float* means3D,
 			const float* shs,
 			const float* colors_precomp,
+			const float* ins_feats,
 			const float* alphas,
 			const float* scales,
 			const float scale_modifier,
@@ -60,7 +73,6 @@ namespace CudaRasterizer
 			const float* cov3D_precomp,
 			const float* viewmatrix,
 			const float* projmatrix,
-			const float* projmatrix_raw,
 			const float* campos,
 			const float tan_fovx, float tan_fovy,
 			const int* radii,
@@ -68,21 +80,22 @@ namespace CudaRasterizer
 			char* binning_buffer,
 			char* image_buffer,
 			const float* dL_dpix,
+			const float* dL_dout_ins_feats,
 			const float* dL_dpix_depth,
+			const float* dL_dalphas,
 			float* dL_dmean2D,
 			float* dL_dconic,
 			float* dL_dopacity,
 			float* dL_dcolor,
-			float* dL_dts,
-			float* dL_dray_planes,
+			float* dL_dins_feats,
+			float* dL_ddepth,
 			float* dL_dmean3D,
 			float* dL_dcov3D,
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
-			float* dL_dtau);
+			bool debug);
 	};
-
 };
 
 #endif

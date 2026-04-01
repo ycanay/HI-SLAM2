@@ -1,15 +1,14 @@
+from hislam2.midas.omnidata import OmnidataModel
+from torchvision import transforms
+from hislam2.modules.corr import CorrBlock
+import hislam2.geom.projective_ops as pops
+import torch.nn.functional as F
 import cv2
 import torch
 import lietorch
 import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
-import torch.nn.functional as F
-import geom.projective_ops as pops
-
-from modules.corr import CorrBlock
-from torchvision import transforms
-from midas.omnidata import OmnidataModel
 
 
 def sharpness(image):
@@ -21,7 +20,7 @@ class MotionFilter:
     """ This class is used to filter incoming frames and extract features """
 
     def __init__(self, net, video, config, device="cuda:0"):
-        
+
         # split net modules
         self.cnet = net.cnet
         self.fnet = net.fnet
@@ -41,13 +40,15 @@ class MotionFilter:
         self.shapeness = [0]*5
 
         # mean, std for image normalization
-        self.MEAN = torch.as_tensor([0.485, 0.456, 0.406], device=self.device)[:, None, None]
-        self.STDV = torch.as_tensor([0.229, 0.224, 0.225], device=self.device)[:, None, None]
-        
+        self.MEAN = torch.as_tensor([0.485, 0.456, 0.406], device=self.device)[
+            :, None, None]
+        self.STDV = torch.as_tensor([0.229, 0.224, 0.225], device=self.device)[
+            :, None, None]
+
     @torch.cuda.amp.autocast(enabled=True)
     def context_encoder(self, image):
         """ context features """
-        net, inp = self.cnet(image).split([128,128], dim=2)
+        net, inp = self.cnet(image).split([128, 128], dim=2)
         return net.tanh().squeeze(0), inp.relu().squeeze(0)
 
     @torch.cuda.amp.autocast(enabled=True)
@@ -59,11 +60,14 @@ class MotionFilter:
     @torch.no_grad()
     def prior_extractor(self, im_tensor):
         input_size = im_tensor.shape[-2:]
-        trans_totensor = transforms.Compose([transforms.Resize((512, 512), antialias=True)])
+        trans_totensor = transforms.Compose(
+            [transforms.Resize((512, 512), antialias=True)])
         im_tensor = trans_totensor(im_tensor).cuda()
         if self.omni_dep is None:
-            self.omni_dep = OmnidataModel('depth', 'pretrained_models/omnidata_dpt_depth_v2.ckpt', device="cuda:0")
-            self.omni_normal = OmnidataModel('normal', 'pretrained_models/omnidata_dpt_normal_v2.ckpt', device="cuda:0")
+            self.omni_dep = OmnidataModel(
+                'depth', 'pretrained_models/omnidata_dpt_depth_v2.ckpt', device="cuda:0")
+            self.omni_normal = OmnidataModel(
+                'normal', 'pretrained_models/omnidata_dpt_normal_v2.ckpt', device="cuda:0")
         depth = self.omni_dep(im_tensor)[None] * 50
         depth = F.interpolate(depth, input_size, mode='bicubic')
         depth = depth.float().squeeze()
@@ -80,9 +84,9 @@ class MotionFilter:
         Id = lietorch.SE3.Identity(1,).data.squeeze()
         ht = image.shape[-2] // 8
         wd = image.shape[-1] // 8
-        intrinsics[:,:4] /= 8.0
+        intrinsics[:, :4] /= 8.0
 
-        s = sharpness(image[0].permute(1,2,0).cpu().numpy())
+        s = sharpness(image[0].permute(1, 2, 0).cpu().numpy())
 
         # normalize images
         inputs = image[None].to(self.device) / 255.0
@@ -94,18 +98,20 @@ class MotionFilter:
         ### always add first frame to the depth video ###
         if self.video.counter.value == 0:
             depth, normal = self.prior_extractor(inputs[0])
-            net, inp = self.context_encoder(inputs[:,[0]])
+            net, inp = self.context_encoder(inputs[:, [0]])
             self.net, self.inp, self.fmap = net, inp, gmap
-            self.video.append(tstamp, image[0], None, 1.0, depth, normal, intrinsics, gmap, net[0], inp[0])
+            self.video.append(
+                tstamp, image[0], None, 1.0, depth, normal, intrinsics, gmap, net[0], inp[0])
 
         ### only add new frame if there is enough motion ###
-        else:                
+        else:
             # index correlation volume
-            coords0 = pops.coords_grid(ht, wd, device=self.device)[None,None]
-            corr = CorrBlock(self.fmap[None,[0]], gmap[None,[0]])(coords0)
+            coords0 = pops.coords_grid(ht, wd, device=self.device)[None, None]
+            corr = CorrBlock(self.fmap[None, [0]], gmap[None, [0]])(coords0)
 
             # approximate flow magnitude using 1 update iteration
-            _, delta, weight = self.update(self.net[None], self.inp[None], corr)
+            _, delta, weight = self.update(
+                self.net[None], self.inp[None], corr)
 
             self.deltas.append(delta.norm(dim=-1).mean().item())
             # check motion magnitue / add new frame to video
@@ -119,11 +125,13 @@ class MotionFilter:
 
                 depth, normal = self.prior_extractor(inputs[0])
                 self.count = 0
-                net, inp = self.context_encoder(inputs[:,[0]])
+                net, inp = self.context_encoder(inputs[:, [0]])
                 self.net, self.inp, self.fmap = net, inp, gmap
-                self.video.append(tstamp, image[0], None, None, depth, normal, intrinsics, gmap, net[0], inp[0])
+                self.video.append(
+                    tstamp, image[0], None, None, depth, normal, intrinsics, gmap, net[0], inp[0])
 
             else:
-                self.shapeness[tstamp%5] = s
-                self.cache[tstamp%5] = [tstamp, image, intrinsics, gmap, inputs]
+                self.shapeness[tstamp % 5] = s
+                self.cache[tstamp % 5] = [
+                    tstamp, image, intrinsics, gmap, inputs]
                 self.count += 1
