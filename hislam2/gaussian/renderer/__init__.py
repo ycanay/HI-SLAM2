@@ -65,6 +65,9 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
     shs = pc.get_features
     colors_precomp = None
     ins_feat = pc.get_ins_feat
+    assert ins_feat.shape[1] == empty_ins_feats.shape[0], (
+        f"Instance feature dim mismatch: rendered {ins_feat.shape[1]} vs empty_ins_feats {empty_ins_feats.shape[0]}"
+    )
     rendered_image, rendered_features, radii, rendered_expected_depth, alpha = rasterizer(
         means3D=means3D,
         means2D=means2D,

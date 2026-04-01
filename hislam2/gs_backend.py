@@ -28,7 +28,7 @@ from hislam2.gaussian.utils.loss_utils import (
     kl_regularization_loss,
     prediction_loss,
 )
-from hislam2.gaussian.scene.gaussian_model import GaussianModel
+from hislam2.gaussian.scene.gaussian_model import GaussianModel, INSTANCE_FEAT_DIM
 from hislam2.gaussian.utils.graphics_utils import getProjectionMatrix2
 from hislam2.gaussian.utils.slam_utils import (
     update_pose,
@@ -81,8 +81,8 @@ class GSBackEnd(mp.Process):
         self.gaussians.training_setup(self.opt_params)
         self.background = torch.tensor(
             [0, 0, 0], dtype=torch.float32, device="cuda")
-        self.empty_ins_feats = torch.tensor(
-            [0, 0, 0, 0, 0, 0], dtype=torch.float32, device="cuda"
+        self.empty_ins_feats = torch.zeros(
+            (INSTANCE_FEAT_DIM,), dtype=torch.float32, device="cuda"
         )
 
         self.cameras_extent = 6.0
@@ -90,7 +90,7 @@ class GSBackEnd(mp.Process):
 
         # Semantic predictor head
         self.predictor = Predictor(
-            input_dim=6,
+            input_dim=INSTANCE_FEAT_DIM,
             hidden_dim=256,
             output_dim=self.config["masks"]["no_classes"],
         ).cuda()
@@ -254,19 +254,18 @@ class GSBackEnd(mp.Process):
             self.writer.add_scalar(tag, value, step)
 
     def log_instance_feats(self, tag, ins_feat, step):
-        """Log a 6-channel instance feature map as two normalised RGB images."""
+        """Log an instance feature map as normalised RGB image chunks."""
         if not self.writer:
             return
         C, H, W = ins_feat.shape
-        assert C == 6, f"Expected 6-channel feature map, got {C}"
+        assert C % 3 == 0, f"Expected channel count divisible by 3, got {C}"
         cpu = ins_feat.clone().cpu().detach()
-        t1, t2 = torch.split(cpu, 3, dim=0)
-        t1 = (t1 - t1.min()) / (t1.max() - t1.min() + 1e-5)
-        t2 = (t2 - t2.min()) / (t2.max() - t2.min() + 1e-5)
-        self.writer.add_image(
-            f"{tag}1", t1, global_step=step, dataformats="CHW")
-        self.writer.add_image(
-            f"{tag}2", t2, global_step=step, dataformats="CHW")
+        for idx, start in enumerate(range(0, C, 3), start=1):
+            chunk = cpu[start:start + 3]
+            chunk = (chunk - chunk.min()) / (chunk.max() - chunk.min() + 1e-5)
+            self.writer.add_image(
+                f"{tag}{idx}", chunk, global_step=step, dataformats="CHW"
+            )
         self.writer.flush()
 
     def log_rgb_images(self, tag, image, step):
@@ -1360,7 +1359,7 @@ class GSBackEnd(mp.Process):
 
             if cluster_mean_feats:
                 stacked = torch.stack(cluster_mean_feats,
-                                      dim=0).cuda()   # [K, 6]
+                                      dim=0).cuda()   # [K, C]
                 all_probs = torch.softmax(
                     self.predictor(stacked), dim=-1)  # [K, C]
                 all_labels = all_probs.argmax(
@@ -1391,7 +1390,7 @@ class GSBackEnd(mp.Process):
             viewpoint_cam = self.viewpoints[vp_key]
             render_feats = self._render(viewpoint_cam)["rendered_features"]
             W, H = render_feats.shape[1], render_feats.shape[2]
-            flat_feats = render_feats.permute(1, 2, 0).reshape(-1, 6)
+            flat_feats = render_feats.permute(1, 2, 0).reshape(-1, render_feats.shape[0])
 
             with torch.no_grad():
                 seg_class = torch.argmax(self.predictor(flat_feats), dim=1)

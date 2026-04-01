@@ -13,7 +13,7 @@
 #define CUDA_RASTERIZER_CONFIG_H_INCLUDED
 
 #define NUM_CHANNELS 3 // Default 3, RGB
-#define FEAT_LEN 6 // Default 6, 
+#define FEAT_LEN 12 // Default 6, 
 #define BLOCK_X 16
 #define BLOCK_Y 16
 

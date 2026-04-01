@@ -37,7 +37,7 @@ def incremental_clustering(gaussians: torch.Tensor, ins_feats: torch.Tensor, num
     assert ins_feats.dim() == 2, "ins_feates must be a 2D tensor."
     assert gaussians.shape[0] == ins_feats.shape[0], "gaussians and ins_feates must have the same number of rows."
     assert gaussians.shape[1] == 3, "gaussians must have at least one dimension."
-    assert ins_feats.shape[1] == 6, "ins_feates must have at least one dimension."
+    assert ins_feats.shape[1] > 0, "ins_feates must have at least one dimension."
 
     ins_feat_threshold = 0.05
     fps_ids = fps_indices(gaussians, num_clusters)
@@ -50,7 +50,7 @@ def over_segmentation(gaussians: torch.Tensor, features: torch.Tensor, num_clust
     Over-segments the gaussians tensor by sampling a subset of indices.
     args:
         gaussians (torch.Tensor): Positions of gaussians of shape (N, 3) where N is the number of gaussians.
-        features (torch.Tensor): Instance features of gaussians of shape (N, 6).
+        features (torch.Tensor): Instance features of gaussians of shape (N, D).
         num_clusters (int): The number of clusters to sample.
     returns:
         torch.Tensor: A tensor of shape (num_clusters, D) containing the sampled gaussian indices.
@@ -58,7 +58,7 @@ def over_segmentation(gaussians: torch.Tensor, features: torch.Tensor, num_clust
     assert gaussians.dim() == 2, "gaussians must be a 2D tensor."
     assert gaussians.shape[1] == 3, "gaussians must have at least one dimension."
     assert features.dim() == 2, "features must be a 2D tensor."
-    assert features.shape[1] == 6, "features must have at least one dimension."
+    assert features.shape[1] > 0, "features must have at least one dimension."
     assert gaussians.shape[0] >= num_clusters, "num_clusters must be less than or equal to the number of gaussians."
 
     concat_vector = torch.cat((gaussians, features), dim=1)

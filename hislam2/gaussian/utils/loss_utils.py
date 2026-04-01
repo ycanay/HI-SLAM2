@@ -154,15 +154,15 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
 
     Args:
         gt_masks (Tensor): [num_masks, H1, W1] boolean instance masks
-        feat_map (Tensor): [6, H, W] feature map with 6 channels
-        feature_mean (Tensor): [num_masks, 6] mean features for each mask
+        feat_map (Tensor): [C, H, W] feature map with C channels
+        feature_mean (Tensor): [num_masks, C] mean features for each mask
 
     Returns:
         Tensor: cohesion loss
     """
     num_masks, mask_h, mask_w = gt_masks.shape
     C, H, W = feat_map.shape
-    assert C == 6, "Feature map must have 6 channels."
+    assert feature_mean.shape[1] == C, "Feature map and mean features must match in channel count."
 
     # Resize masks if needed
     if (mask_h, mask_w) != (H, W):
@@ -193,7 +193,7 @@ def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors
     Regularization loss over instance features using KL divergence between softmaxed features.
 
     Args:
-        ins_feat (Tensor): [N, 6] instance features
+        ins_feat (Tensor): [N, D] instance features
         gaussians (Tensor): [N, 3] positions (used for nearest neighbor search)
         num_of_samples (int): number of sampled points (m)
         num_of_neighbors (int): number of nearest neighbors (k)
