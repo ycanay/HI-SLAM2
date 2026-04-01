@@ -3,9 +3,7 @@ from transformers.utils import logging as hf_logging
 from PIL import Image
 import numpy as np
 import torch
-from PIL import Image
 import cv2
-from scipy import ndimage
 from hislam2.gaussian.utils.camera_utils import Camera
 from pathlib import Path
 import json
@@ -16,17 +14,24 @@ hf_logging.set_verbosity_error()
 class MaskGenerator:
     def __init__(self, config, save_dir):
         save_dir = Path(save_dir)
-        save_path = save_dir/'masks'
-        if not save_path.exists():
-            save_path.mkdir(parents=True, exist_ok=True)
-        self.semantic_masks_path = save_path/'semantic'
-        if not self.semantic_masks_path.exists():
-            self.semantic_masks_path.mkdir(parents=True, exist_ok=True)
+        masks_cfg = config.get("masks", {})
+        default_output = save_dir / "masks" / "mask2former"
+        self.output_masks_path = Path(
+            masks_cfg.get("mask2former_masks_dir", default_output)
+        )
+        self.output_masks_path.mkdir(parents=True, exist_ok=True)
+
+        model_name = masks_cfg.get(
+            "mask2former_network",
+            masks_cfg.get(
+                "network", "facebook/mask2former-swin-large-coco-panoptic"),
+        )
+        use_cuda = torch.cuda.is_available()
         self.segmenter = pipeline(
             task="image-segmentation",
-            model=config["masks"]["network"],
-            dtype=torch.float16,
-            device=0,
+            model=model_name,
+            dtype=torch.float16 if use_cuda else torch.float32,
+            device=0 if use_cuda else -1,
         )
         self.model = self.segmenter.model
         # Check the model's configuration
@@ -38,7 +43,6 @@ class MaskGenerator:
 
     def generate_and_save_masks(self, viewpoint: Camera):
         image = viewpoint.original_image
-        semantic_dict = {}
 
         if isinstance(image, torch.Tensor):
             image = image.detach().cpu()  # ensure on CPU
@@ -50,38 +54,72 @@ class MaskGenerator:
                 image = (image * 255).clip(0, 255).astype('uint8')
             image = Image.fromarray(image)
         segmentation_results = self.segmenter(image)
-        semantic_masks_path = self.semantic_masks_path / \
+        if segmentation_results is None:
+            segmentation_results = []
+        elif isinstance(segmentation_results, dict):
+            segmentation_results = [segmentation_results]
+        frame_dir = self.output_masks_path / \
             f"frame{int(viewpoint.tstamp):06d}"
-        if semantic_masks_path.exists():
-            return
-        semantic_masks_path.mkdir(parents=True, exist_ok=True)
-        semantic_count = 0
-        for result in segmentation_results:
-            if (semantic_masks_path / f"{semantic_count:03d}.png").exists():
-                break
-            mask = np.array(result['mask'])
-            label = result['label']
-            semantic_dict[f"{semantic_count:03d}.png"] = {"label": label,
-                                                          "id": self.label2id[label] if self.label2id is not None else None}
-            semantic_mask = mask.copy()
-            if semantic_mask.dtype == bool:
-                semantic_segmentation = semantic_mask.astype("uint8") * 255
-            elif semantic_mask.dtype != "uint8":
-                semantic_segmentation = semantic_mask.astype("uint8")
-            else:
-                semantic_segmentation = semantic_mask
-            cv2.imwrite(str(semantic_masks_path /
-                        f"{semantic_count:03d}.png"), semantic_segmentation)
-            semantic_count += 1
+        if (frame_dir / "masks.json").exists():
+            sam_masks, _instance_ids = self.read_masks(viewpoint, "instance")
+            sem_masks, sem_ids = self.read_masks(viewpoint, "semantic")
+            return sam_masks, sem_masks, sem_ids
 
-        with open(semantic_masks_path / "metadata.json", 'w') as f:
-            json.dump(semantic_dict, f, indent=4)
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        class_instance_counter = {}
+        masks_json = []
+        all_instance_masks = []
+
+        for result in segmentation_results:
+            if not isinstance(result, dict):
+                continue
+
+            label_name = result.get("label")
+            mask_value = result.get("mask")
+            if label_name is None or mask_value is None:
+                continue
+
+            if self.label2id is not None and label_name in self.label2id:
+                label_id = int(self.label2id[label_name])
+            else:
+                try:
+                    label_id = int(label_name)
+                except (TypeError, ValueError):
+                    continue
+
+            mask = np.array(mask_value)
+            binary_mask = (mask > 0).astype(np.uint8) * 255
+            if binary_mask.max() == 0:
+                continue
+
+            instance_id = class_instance_counter.get(label_id, 0)
+            class_instance_counter[label_id] = instance_id + 1
+            mask_name = f"{label_id}_{instance_id}.png"
+            cv2.imwrite(str(frame_dir / mask_name), binary_mask)
+            all_instance_masks.append(binary_mask > 0)
+
+            masks_json.append(
+                {
+                    "semantic_id": int(label_id),
+                    "instance_id": int(instance_id),
+                }
+            )
+
+        with open(frame_dir / "masks.json", "w") as f:
+            json.dump(masks_json, f, indent=2)
+
+        if not all_instance_masks:
+            empty_masks = torch.empty((0, 0, 0), dtype=torch.uint8)
+            return empty_masks, None, None
+
+        sam_masks = torch.from_numpy(
+            np.stack(all_instance_masks, axis=0).astype(np.uint8))
+        sem_masks, sem_ids = self.read_masks(viewpoint, "semantic")
+        return sam_masks, sem_masks, sem_ids
 
     def read_masks(self, viewpoint, type):
-        if type == 'instance':
-            mask_path = self.semantic_masks_path  # Not in use
-        elif type == 'semantic':
-            mask_path = self.semantic_masks_path
+        if type in ["instance", "semantic"]:
+            mask_path = self.output_masks_path
         else:
             raise ValueError("type must be 'instance' or 'semantic'")
 
@@ -89,10 +127,6 @@ class MaskGenerator:
         mask_directory = mask_path / frame_id
         if not mask_directory.exists():
             mask_directory = mask_path / f"{int(viewpoint.tstamp):06d}"
-
-        metadata_file = mask_directory / "metadata.json"
-        with open(metadata_file, 'r') as f:
-            metadata = json.load(f)
 
         mask_files = sorted(mask_directory.glob("*.png"))
 
@@ -102,17 +136,28 @@ class MaskGenerator:
         first_mask = np.array(Image.open(mask_files[0]).convert("L"))
         num_masks = len(mask_files)
         masks = np.empty((num_masks, *first_mask.shape), dtype=np.uint8)
-        mask_ids = np.empty(num_masks, dtype=np.int64)
+        instance_label_ids = np.empty(num_masks, dtype=np.int64)
 
         masks[0] = first_mask
-        mask_ids[0] = metadata[mask_files[0].name]['id']
+        instance_label_ids[0] = int(mask_files[0].stem.split("_")[0])
 
         for i, mask_file in enumerate(mask_files[1:], start=1):
             masks[i] = np.array(Image.open(mask_file).convert("L"))
-            mask_ids[i] = metadata[mask_file.name]['id']
+            instance_label_ids[i] = int(mask_file.stem.split("_")[0])
 
-        # Convert to torch tensors
         masks = torch.from_numpy(masks)
-        mask_ids = torch.from_numpy(mask_ids)
+        instance_label_ids = torch.from_numpy(instance_label_ids)
 
-        return masks, mask_ids
+        if type == "instance":
+            return masks, instance_label_ids
+
+        semantic_masks = []
+        semantic_ids = torch.unique(instance_label_ids)
+        for semantic_id in semantic_ids:
+            semantic_masks.append(
+                (masks[instance_label_ids == semantic_id] > 0).any(
+                    dim=0).to(torch.uint8)
+            )
+        semantic_masks = torch.stack(semantic_masks, dim=0)
+
+        return semantic_masks, semantic_ids

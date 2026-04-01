@@ -5,6 +5,7 @@ import csv
 import json
 from typing import cast
 from collections import OrderedDict
+from pathlib import Path
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -38,7 +39,7 @@ from hislam2.gaussian.utils.slam_utils import (
 from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
-from hislam2.gaussian.semantics.panoptic_mask_generator import MaskGenerator
+from hislam2.gaussian.semantics.mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import (
     read_gt_masks,
     read_sam3_masks,
@@ -67,6 +68,12 @@ class GSBackEnd(mp.Process):
 
         self.opt_params = munchify(config["opt_params"])
         self.config["Training"]["monocular"] = False
+        self.mask_source = str(
+            self.config.get("masks", {}).get("source", "sam3")
+        ).lower()
+        if self.mask_source == "mas2former":
+            self.mask_source = "mask2former"
+        self.mask_generator = None
 
         # Gaussian model
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
@@ -314,7 +321,7 @@ class GSBackEnd(mp.Process):
         )
 
     def _load_semantic_masks(self, tstamp):
-        """Load and GPU-transfer SAM3 + semantic masks for *tstamp*.
+        """Load and GPU-transfer configured instance + semantic masks for *tstamp*.
 
         CPU tensors are cached in ``self._mask_cache`` (keyed by *tstamp*) so
         that repeated calls for the same frame skip all HDD I/O.  Only the
@@ -334,12 +341,51 @@ class GSBackEnd(mp.Process):
             sam_cpu, sem_cpu, ids_cpu = self._mask_cache[key]
         else:
             # Cache miss – read from HDD
-            masks_dir = self.config["masks"]["sam3_masks_dir"]
-            sam_masks_dict = read_sam3_masks(tstamp, masks_dir)
-            sem_cpu, ids_cpu = sam_masks_semantic_image(
-                sam_masks_dict, tstamp, masks_dir
-            )
-            sam_cpu = sam3_dict_to_tensor(sam_masks_dict)  # keep on CPU
+            masks_cfg = self.config.get("masks", {})
+            if self.mask_source == "sam3":
+                masks_dir = masks_cfg.get("sam3_masks_dir")
+            elif self.mask_source == "mask2former":
+                masks_dir = masks_cfg.get("mask2former_masks_dir")
+            else:
+                raise ValueError(
+                    f"Unsupported masks.source '{self.mask_source}'. "
+                    "Use 'sam3' or 'mask2former'."
+                )
+
+            if not masks_dir:
+                raise ValueError(
+                    f"Mask directory is not configured for masks.source='{self.mask_source}'."
+                )
+
+            frame_dir = Path(masks_dir) / f"frame{int(tstamp):06d}"
+            has_precomputed = (frame_dir / "masks.json").exists()
+
+            if self.mask_source == "mask2former" and not has_precomputed:
+                if self.mask_generator is None:
+                    self.mask_generator = MaskGenerator(
+                        self.config, self.save_dir)
+
+                viewpoint = self.viewpoints.get(int(tstamp), None)
+                if viewpoint is None:
+                    for vp in self.viewpoints.values():
+                        if int(vp.tstamp) == int(tstamp):
+                            viewpoint = vp
+                            break
+
+                if viewpoint is None:
+                    raise RuntimeError(
+                        f"No viewpoint found for tstamp={int(tstamp)} to run Mask2Former."
+                    )
+
+                sam_cpu, sem_cpu, ids_cpu = self.mask_generator.generate_and_save_masks(
+                    viewpoint
+                )
+            else:
+                sam_masks_dict = read_sam3_masks(tstamp, masks_dir)
+                sem_cpu, ids_cpu = sam_masks_semantic_image(
+                    sam_masks_dict, tstamp, masks_dir
+                )
+                sam_cpu = sam3_dict_to_tensor(sam_masks_dict)  # keep on CPU
             # sem_cpu / ids_cpu are already CPU tensors (or None)
 
             # Evict the least-recently-used entry if the cache is full
@@ -394,8 +440,12 @@ class GSBackEnd(mp.Process):
         # Prediction loss (classification head)
         p_loss = None
         if sem_mask_ids is not None:
-            predictions = self.predictor(sem_feat_mean)
-            p_loss = prediction_loss(predictions, sem_mask_ids)
+            valid_feat, valid_ids = self._filter_prediction_targets(
+                sem_feat_mean, sem_mask_ids
+            )
+            if valid_feat is not None and valid_ids is not None:
+                predictions = self.predictor(valid_feat)
+                p_loss = prediction_loss(predictions, valid_ids)
 
         # KL regularisation over the full Gaussian field
         r_loss = kl_regularization_loss(
@@ -407,13 +457,33 @@ class GSBackEnd(mp.Process):
 
         return dict(s_loss=s_loss, c_loss=c_loss, r_loss=r_loss, p_loss=p_loss)
 
+    def _filter_prediction_targets(self, sem_feat_mean, sem_mask_ids):
+        """Keep only semantic targets that fall inside predictor class range."""
+        if sem_feat_mean is None or sem_mask_ids is None:
+            return None, None
+
+        targets = sem_mask_ids.long()
+        if sem_feat_mean.shape[0] != targets.shape[0]:
+            n = min(sem_feat_mean.shape[0], targets.shape[0])
+            if n <= 0:
+                return None, None
+            sem_feat_mean = sem_feat_mean[:n]
+            targets = targets[:n]
+
+        n_classes = int(self.config["masks"]["no_classes"])
+        valid = (targets >= 0) & (targets < n_classes)
+        if not bool(valid.any()):
+            return None, None
+
+        return sem_feat_mean[valid], targets[valid]
+
     def _accumulate_semantic_loss(self, losses):
         """Sum individual feature losses into a single optimisation target."""
         total = losses["s_loss"] + losses["r_loss"]
         if losses["c_loss"] is not None:
             total = total + self.opt_params.lambda_cohesion * losses["c_loss"]
         if losses["p_loss"] is not None:
-            total = total + 0.1 * losses["p_loss"]
+            total = total + 0.5 * losses["p_loss"]
         return total
 
     # ------------------------------------------------------------------
@@ -913,7 +983,7 @@ class GSBackEnd(mp.Process):
         Log("Starting color refinement")
         self._setup_pose_optimizers()
         self._gs_refinement_loop(iteration_total)
-        self._predictor_training_loop(iteration_total)
+        self._predictor_training_loop(5000)
         self._finalize_segmentation()
         Log("Map refinement done")
         if self.writer:
@@ -1183,10 +1253,32 @@ class GSBackEnd(mp.Process):
 
             loss_start = time.perf_counter()
             sem_feat_mean = mask_feature_mean(ins_feat, sem_masks)
+            valid_feat, valid_ids = self._filter_prediction_targets(
+                sem_feat_mean, sem_mask_ids
+            )
+
+            if valid_feat is None or valid_ids is None:
+                self._append_runtime_analysis(
+                    "predictor_training",
+                    {
+                        "rendering_scene_s": rendering_scene_s,
+                        "reading_masks_s": reading_masks_s,
+                        "calculating_loss_s": time.perf_counter() - loss_start,
+                        "backpropagation_s": 0.0,
+                        "optimizer_step_s": 0.0,
+                        "adaptive_control_s": 0.0,
+                        "total_iteration_s": time.perf_counter() - iter_start,
+                    },
+                    iteration=iteration,
+                    frame_tstamp=viewpoint_cam.tstamp,
+                    num_viewpoints=1,
+                    optimize_sem=True,
+                )
+                continue
 
             # Detach so gradients only update the predictor head
-            predictions = self.predictor(sem_feat_mean.clone().detach())
-            p_loss = prediction_loss(predictions, sem_mask_ids)
+            predictions = self.predictor(valid_feat.clone().detach())
+            p_loss = prediction_loss(predictions, valid_ids)
             pending_losses.append(p_loss)
             calculating_loss_s = time.perf_counter() - loss_start
 

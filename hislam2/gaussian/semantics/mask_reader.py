@@ -59,7 +59,7 @@ def read_sam3_masks(image_idx: int, mask_path: str) -> dict[int, list[torch.Tens
     return masks
 
 
-def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: int, mask_path: str) -> tuple[torch.Tensor, torch.Tensor]:
+def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: int, mask_path: str) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """
     Convert SAM masks to a semantic segmentation image.
     Args:
@@ -80,17 +80,27 @@ def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: in
     with open(json_file, 'r') as f:
         metadata = json.load(f)
     for item in metadata:
-        label = item['item_id']
-        instance = item['instance_no']
+        if 'item_id' in item:
+            label = item['item_id']
+            instance = item['instance_no']
+        else:
+            label = item['semantic_id']
+            instance = item['instance_id']
+        if label not in masks:
+            continue
+        if instance < 0 or instance >= len(masks[label]):
+            continue
         mask = masks[label][instance]
         semantic_image[mask > 0] = int(label)
-    mask_ids = list(set(semantic_image.flatten().tolist()))
-    mask_ids.remove(-1)
-    mask_ids = torch.tensor(mask_ids, dtype=torch.int64)
-    for mask_id in mask_ids:
+    semantic_ids = torch.unique(semantic_image)
+    semantic_ids = semantic_ids[semantic_ids >= 0].to(torch.int64)
+    if semantic_ids.numel() == 0:
+        return None, None
+
+    for mask_id in semantic_ids.tolist():
         semantic_masks.append((semantic_image == mask_id).to(torch.uint8))
     semantic_masks = torch.stack(semantic_masks, dim=0)
-    return semantic_masks, mask_ids
+    return semantic_masks, semantic_ids
 
 
 def sam3_dict_to_tensor(masks: dict[int, list[torch.Tensor]]) -> torch.Tensor:
@@ -101,11 +111,9 @@ def sam3_dict_to_tensor(masks: dict[int, list[torch.Tensor]]) -> torch.Tensor:
     Returns:
         all_masks (torch.Tensor): the masks in shape of [total_num_masks, H, W].
     """
-    all_masks = []
+    all_mask_tensors = []
     for label_masks in masks.values():
-        all_masks.extend(label_masks)
-    if all_masks:
-        all_masks = torch.stack(all_masks, dim=0)
-    else:
-        all_masks = torch.empty((0, 0, 0), dtype=torch.uint8)
-    return all_masks
+        all_mask_tensors.extend(label_masks)
+    if all_mask_tensors:
+        return torch.stack(all_mask_tensors, dim=0)
+    return torch.empty((0, 0, 0), dtype=torch.uint8)
