@@ -4,8 +4,6 @@ import time
 import csv
 import json
 from typing import cast
-from collections import OrderedDict
-from pathlib import Path
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -39,13 +37,7 @@ from hislam2.gaussian.utils.slam_utils import (
 from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
-from hislam2.gaussian.semantics.mask_generator import MaskGenerator
-from hislam2.gaussian.semantics.mask_reader import (
-    read_gt_masks,
-    read_sam3_masks,
-    sam_masks_semantic_image,
-    sam3_dict_to_tensor,
-)
+from hislam2.gaussian.semantics.mask_cache import MaskCache
 from hislam2.gaussian.semantics.predictor import Predictor
 from hislam2.gaussian.utils.post_processing import cluster_hdbscan
 
@@ -68,12 +60,6 @@ class GSBackEnd(mp.Process):
 
         self.opt_params = munchify(config["opt_params"])
         self.config["Training"]["monocular"] = False
-        self.mask_source = str(
-            self.config.get("masks", {}).get("source", "sam3")
-        ).lower()
-        if self.mask_source == "mas2former":
-            self.mask_source = "mask2former"
-        self.mask_generator = None
 
         # Gaussian model
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
@@ -102,12 +88,10 @@ class GSBackEnd(mp.Process):
             self.predictor_optimizer, gamma=0.9
         )
 
-        # Mask cache: stores CPU tensors to avoid repeated HDD reads.
-        # Keys are tstamp ints; values are (sam_masks_cpu, sem_masks_cpu, sem_mask_ids_cpu).
-        # _mask_cache_max_size bounds memory use; oldest entries are evicted LRU-style.
-        self._mask_cache: OrderedDict = OrderedDict()
-        self._mask_cache_max_size: int = self.config.get(
-            "mask_cache_max_frames", 300
+        self.mask_cache = MaskCache(
+            config,
+            save_dir,
+            max_frames=config.get("mask_cache_max_frames", 300),
         )
 
         # Runtime analysis
@@ -312,110 +296,6 @@ class GSBackEnd(mp.Process):
     # Semantic helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _has_valid_masks(mask_tensor):
-        """Return True only for non-empty mask tensors with valid spatial size."""
-        return (
-            mask_tensor is not None
-            and isinstance(mask_tensor, torch.Tensor)
-            and mask_tensor.ndim == 3
-            and mask_tensor.shape[0] > 0
-            and mask_tensor.shape[1] > 0
-            and mask_tensor.shape[2] > 0
-        )
-
-    def _load_semantic_masks(self, tstamp):
-        """Load and GPU-transfer configured instance + semantic masks for *tstamp*.
-
-        CPU tensors are cached in ``self._mask_cache`` (keyed by *tstamp*) so
-        that repeated calls for the same frame skip all HDD I/O.  Only the
-        final ``.cuda()`` transfers happen on every call, which are cheap
-        compared to disk reads.
-
-        Returns:
-            sam_masks    (Tensor): Binary SAM instance masks  [N, H, W].
-            sem_masks    (Tensor | None): Semantically grouped masks.
-            sem_mask_ids (Tensor | None): Class label per semantic mask.
-        """
-        key = int(tstamp)
-
-        if key in self._mask_cache:
-            # Move to front (most-recently-used)
-            self._mask_cache.move_to_end(key)
-            sam_cpu, sem_cpu, ids_cpu = self._mask_cache[key]
-        else:
-            # Cache miss – read from HDD
-            masks_cfg = self.config.get("masks", {})
-            if self.mask_source == "sam3":
-                masks_dir = masks_cfg.get("sam3_masks_dir")
-            elif self.mask_source == "mask2former":
-                masks_dir = masks_cfg.get("mask2former_masks_dir")
-            else:
-                raise ValueError(
-                    f"Unsupported masks.source '{self.mask_source}'. "
-                    "Use 'sam3' or 'mask2former'."
-                )
-
-            if not masks_dir:
-                raise ValueError(
-                    f"Mask directory is not configured for masks.source='{self.mask_source}'."
-                )
-
-            frame_dir = Path(masks_dir) / f"frame{int(tstamp):06d}"
-            has_precomputed = (frame_dir / "masks.json").exists()
-
-            if self.mask_source == "mask2former" and not has_precomputed:
-                if self.mask_generator is None:
-                    self.mask_generator = MaskGenerator(
-                        self.config, self.save_dir)
-
-                viewpoint = self.viewpoints.get(int(tstamp), None)
-                if viewpoint is None:
-                    for vp in self.viewpoints.values():
-                        if int(vp.tstamp) == int(tstamp):
-                            viewpoint = vp
-                            break
-
-                if viewpoint is None:
-                    raise RuntimeError(
-                        f"No viewpoint found for tstamp={int(tstamp)} to run Mask2Former."
-                    )
-
-                sam_cpu, sem_cpu, ids_cpu = self.mask_generator.generate_and_save_masks(
-                    viewpoint
-                )
-            else:
-                sam_masks_dict = read_sam3_masks(tstamp, masks_dir)
-                sem_cpu, ids_cpu = sam_masks_semantic_image(
-                    sam_masks_dict, tstamp, masks_dir
-                )
-                sam_cpu = sam3_dict_to_tensor(sam_masks_dict)  # keep on CPU
-            # sem_cpu / ids_cpu are already CPU tensors (or None)
-
-            # Evict the least-recently-used entry if the cache is full
-            if len(self._mask_cache) >= self._mask_cache_max_size:
-                evicted_key, _ = self._mask_cache.popitem(last=False)
-                # Uncomment for debugging:
-                # Log(f"Mask cache evicted frame {evicted_key}")
-
-            self._mask_cache[key] = (sam_cpu, sem_cpu, ids_cpu)
-
-        # Treat empty masks as missing so downstream code can safely skip
-        # semantic terms on frames where SAM produced no valid output.
-        if not self._has_valid_masks(sam_cpu):
-            sam_cpu = None
-        if not self._has_valid_masks(sem_cpu):
-            sem_cpu = None
-            ids_cpu = None
-        if ids_cpu is not None and ids_cpu.numel() == 0:
-            ids_cpu = None
-
-        # Transfer to GPU (non-blocking pinned copy is fastest, but a plain
-        # .cuda() is safe even when the tensor is not pinned)
-        sam_masks = sam_cpu.cuda() if sam_cpu is not None else None
-        sem_masks = sem_cpu.cuda() if sem_cpu is not None else None
-        sem_mask_ids = ids_cpu.cuda() if ids_cpu is not None else None
-        return sam_masks, sem_masks, sem_mask_ids
 
     def _compute_mask_feature_losses(
         self, ins_feat, sam_masks, sem_masks, sem_mask_ids
@@ -427,7 +307,7 @@ class GSBackEnd(mp.Process):
         ``p_loss`` is ``None`` when *sem_mask_ids* is ``None``.
         """
         # If SAM returned no valid masks for this frame, skip semantic losses.
-        if not self._has_valid_masks(sam_masks):
+        if not MaskCache.is_valid(sam_masks):
             zero = ins_feat.new_zeros(())
             return dict(s_loss=zero, c_loss=None, r_loss=zero, p_loss=None)
 
@@ -664,7 +544,7 @@ class GSBackEnd(mp.Process):
         )
         # Warm the CPU mask cache for this keyframe now so that by the time the
         # refinement loop starts every frame is already resident in RAM.
-        self._load_semantic_masks(viewpoint.tstamp)
+        self.mask_cache.load(viewpoint.tstamp, self.viewpoints)
 
     def reset(self):
         self.iteration_count = 0
@@ -706,11 +586,11 @@ class GSBackEnd(mp.Process):
             c_loss = None
             if optimize_sem:
                 mask_start = time.perf_counter()
-                sam_masks, sem_masks, _sem_ids = self._load_semantic_masks(
-                    viewpoint.tstamp
+                sam_masks, sem_masks, _sem_ids = self.mask_cache.load(
+                    viewpoint.tstamp, self.viewpoints
                 )
                 reading_masks_s = time.perf_counter() - mask_start
-                if self._has_valid_masks(sam_masks):
+                if MaskCache.is_valid(sam_masks):
                     sam_feat_mean = mask_feature_mean(ins_feat[6:], sam_masks)
                     s_loss = separation_loss(sam_feat_mean)
                     c_loss = cohesion_loss(
@@ -814,7 +694,7 @@ class GSBackEnd(mp.Process):
         # After the loop the dict is deleted so GPU memory is reclaimed immediately.
         preload_start = time.perf_counter()
         window_gpu_masks: dict = {
-            int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
+            int(vp.tstamp): self.mask_cache.load(vp.tstamp, self.viewpoints)
             for vp in window_viewpoints
         }
         preload_time = time.perf_counter() - preload_start
@@ -892,8 +772,8 @@ class GSBackEnd(mp.Process):
                         sam_masks, sem_masks, sem_mask_ids = window_gpu_masks[_key]
                     else:
                         mask_start = time.perf_counter()
-                        sam_masks, sem_masks, sem_mask_ids = self._load_semantic_masks(
-                            viewpoint.tstamp
+                        sam_masks, sem_masks, sem_mask_ids = self.mask_cache.load(
+                            viewpoint.tstamp, self.viewpoints
                         )
                         reading_masks_s += time.perf_counter() - mask_start
                     feat_losses = self._compute_mask_feature_losses(
@@ -1079,7 +959,7 @@ class GSBackEnd(mp.Process):
         # no HDD I/O.  The dict is deleted immediately after the loop.
         preload_start = time.perf_counter()
         all_gpu_masks: dict = {
-            int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
+            int(vp.tstamp): self.mask_cache.load(vp.tstamp, self.viewpoints)
             for vp in self.viewpoints.values()
         }
         preload_time = time.perf_counter() - preload_start
@@ -1277,8 +1157,8 @@ class GSBackEnd(mp.Process):
                 random.choice(list(self.viewpoints.keys()))
             ]
             mask_start = time.perf_counter()
-            _, sem_masks, sem_mask_ids = self._load_semantic_masks(
-                viewpoint_cam.tstamp)
+            _, sem_masks, sem_mask_ids = self.mask_cache.load(
+                viewpoint_cam.tstamp, self.viewpoints)
             reading_masks_s = time.perf_counter() - mask_start
 
             if sem_mask_ids is None or sem_masks is None:
