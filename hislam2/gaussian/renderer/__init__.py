@@ -12,8 +12,21 @@
 import os
 import torch
 import math
+from typing import NamedTuple
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from hislam2.gaussian.scene.gaussian_model import GaussianModel
+
+
+class RenderPackage(NamedTuple):
+    """Typed container for all outputs of a single Gaussian rasterization call."""
+
+    image: torch.Tensor            # [3, H, W] rendered RGB
+    depth: torch.Tensor            # [1, H, W] expected depth
+    viewspace_points: torch.Tensor # [N, 3] screen-space means with gradients
+    visibility_filter: torch.Tensor # [N] bool — Gaussians with radii > 0
+    radii: torch.Tensor            # [N] screen-space radii
+    alpha: torch.Tensor            # [1, H, W] accumulated alpha
+    ins_feat: torch.Tensor         # [D, H, W] rendered instance features
 
 
 def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_ins_feats: torch.Tensor, scaling_modifier=1.0):
@@ -43,15 +56,15 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
             screenspace_points.retain_grad()
         except Exception:
             pass
-        return {
-            "render": rendered_image,
-            "depth": rendered_expected_depth,
-            "viewspace_points": screenspace_points,
-            "visibility_filter": torch.empty((0,), device=bg_color.device, dtype=torch.bool),
-            "radii": radii,
-            "alpha": alpha,
-            "rendered_features": rendered_features,
-        }
+        return RenderPackage(
+            image=rendered_image,
+            depth=rendered_expected_depth,
+            viewspace_points=screenspace_points,
+            visibility_filter=torch.empty((0,), device=bg_color.device, dtype=torch.bool),
+            radii=radii,
+            alpha=alpha,
+            ins_feat=rendered_features,
+        )
 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -115,10 +128,12 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {"render": rendered_image,
-            "depth": rendered_expected_depth,
-            "viewspace_points": means2D,
-            "visibility_filter": radii > 0,
-            "radii": radii,
-            "alpha": alpha,
-            "rendered_features": rendered_features, }
+    return RenderPackage(
+        image=rendered_image,
+        depth=rendered_expected_depth,
+        viewspace_points=means2D,
+        visibility_filter=radii > 0,
+        radii=radii,
+        alpha=alpha,
+        ins_feat=rendered_features,
+    )

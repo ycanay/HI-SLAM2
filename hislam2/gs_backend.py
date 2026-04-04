@@ -276,22 +276,6 @@ class GSBackEnd(mp.Process):
             torch.cuda.synchronize()
         return pkg
 
-    def _unpack_render_pkg(self, pkg):
-        """Unpack a render package into its seven components.
-
-        Returns:
-            (image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat)
-        """
-        return (
-            pkg["render"],
-            pkg["viewspace_points"],
-            pkg["visibility_filter"],
-            pkg["radii"],
-            pkg["depth"],
-            pkg["alpha"],
-            pkg["rendered_features"],
-        )
-
     # ------------------------------------------------------------------
     # Semantic helpers
     # ------------------------------------------------------------------
@@ -567,9 +551,9 @@ class GSBackEnd(mp.Process):
             render_start = time.perf_counter()
             pkg = self._render(viewpoint)
             rendering_scene_s = time.perf_counter() - render_start
-
-            image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
-                self._unpack_render_pkg(pkg)
+            image, depth, viewspace_pts, vis_filter, radii, ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
             )
 
             loss_start = time.perf_counter()
@@ -741,8 +725,9 @@ class GSBackEnd(mp.Process):
                 render_start = time.perf_counter()
                 pkg = self._render(viewpoint)
                 rendering_scene_s += time.perf_counter() - render_start
-                image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
-                    self._unpack_render_pkg(pkg)
+                image, depth, viewspace_pts, vis_filter, radii, alpha, ins_feat = (
+                    pkg.image, pkg.depth, pkg.viewspace_points,
+                    pkg.visibility_filter, pkg.radii, pkg.alpha, pkg.ins_feat
                 )
 
                 # Geometry losses
@@ -988,7 +973,7 @@ class GSBackEnd(mp.Process):
             render_start = time.perf_counter()
             pkg = self._render(viewpoint_cam)
             rendering_scene_s = time.perf_counter() - render_start
-            image, _, _, _, depth, _, ins_feat = self._unpack_render_pkg(pkg)
+            image, depth, ins_feat = pkg.image, pkg.depth, pkg.ins_feat
 
             # Exposure compensation
             image = (
@@ -1181,7 +1166,7 @@ class GSBackEnd(mp.Process):
                 continue
 
             render_start = time.perf_counter()
-            ins_feat = self._render(viewpoint_cam)["rendered_features"]
+            ins_feat = self._render(viewpoint_cam).ins_feat
             rendering_scene_s = time.perf_counter() - render_start
 
             loss_start = time.perf_counter()
@@ -1338,7 +1323,7 @@ class GSBackEnd(mp.Process):
         )
         for vp_idx, vp_key in enumerate(sample_keys):
             viewpoint_cam = self.viewpoints[vp_key]
-            render_feats = self._render(viewpoint_cam)["rendered_features"]
+            render_feats = self._render(viewpoint_cam).ins_feat
             W, H = render_feats.shape[1], render_feats.shape[2]
             flat_feats = render_feats.permute(
                 1, 2, 0).reshape(-1, render_feats.shape[0])
