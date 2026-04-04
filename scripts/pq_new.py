@@ -13,6 +13,10 @@ matplotlib.use('Agg')
 DATASET_PATH = Path("/storage/user/ayu/repos/HI-SLAM2/data/Replica_semantics")
 OUTPUT_PATH = Path("/storage/user/ayu/repos/HI-SLAM2/outputs/semantic")
 
+# Evaluation config JSONs (tracked in the repo under scripts/eval_configs/).
+# These are small class-mapping files independent of the actual Replica dataset.
+_EVAL_CONFIGS_DIR = Path(__file__).parent / "eval_configs"
+
 
 def color_to_instance_id(rgb):
     """
@@ -187,7 +191,7 @@ def load_panoptic_config(config_path=None):
         dict: Mapping from semantic ID to class info (name, isStuff)
     """
     if config_path is None:
-        config_path = DATASET_PATH / "semantics_panoptic.json"
+        config_path = _EVAL_CONFIGS_DIR / "semantics_panoptic.json"
 
     with open(config_path, 'r') as f:
         classes = json.load(f)
@@ -219,7 +223,7 @@ def load_panoptic_lifting_mapping(mapping_path=None):
             - target_classes: dict mapping target_id -> {name, isThing}
     """
     if mapping_path is None:
-        mapping_path = DATASET_PATH / "map_panoptic_lifting.json"
+        mapping_path = _EVAL_CONFIGS_DIR / "map_panoptic_lifting.json"
 
     with open(mapping_path, 'r') as f:
         mapping_list = json.load(f)
@@ -458,11 +462,21 @@ def evaluate_panoptic_quality(
     semantic_mapping = None
     if mapping_mode == "lifting":
         # Load panoptic lifting mapping (Replica -> Panoptic Lifting class set)
-        semantic_mapping, target_classes = load_panoptic_lifting_mapping(
-            dataset_path / "map_panoptic_lifting.json")
+        semantic_mapping, target_classes = load_panoptic_lifting_mapping()
 
         # Get thing and stuff class sets from the mapping
         things, stuffs = get_things_and_stuffs_from_mapping(target_classes)
+
+        # If any valid target class uses void_id (0), shift all target IDs by +1
+        # so that 0 is reserved exclusively for unmapped/void pixels.
+        # Without this shift, apply_semantic_mapping(..., unmapped_value=0) makes
+        # truly unmapped pixels indistinguishable from valid classes that happen to
+        # have target ID 0 (e.g. "wall" in the Panoptic Lifting mapping), and
+        # stuffs.discard(void_id) below would silently drop that class entirely.
+        if void_id in things or void_id in stuffs:
+            semantic_mapping = {src: tgt + 1 for src, tgt in semantic_mapping.items()}
+            things = {c + 1 for c in things}
+            stuffs = {c + 1 for c in stuffs}
 
         # Void/unknown should never be evaluated as a class
         things.discard(void_id)
@@ -476,8 +490,7 @@ def evaluate_panoptic_quality(
             print(f"Stuffs: {stuffs}")
     else:
         # Use the original Replica semantic IDs and panoptic config to define thing/stuff
-        id_to_class = load_panoptic_config(
-            dataset_path / "semantics_panoptic.json")
+        id_to_class = load_panoptic_config()
         things, stuffs = get_things_and_stuffs(id_to_class)
 
         # Void/unknown should never be evaluated as a class

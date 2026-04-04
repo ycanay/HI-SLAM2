@@ -1,0 +1,461 @@
+[
+    {
+        "id": 3,
+        "name": "basket",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 7,
+        "name": "bed",
+        "mapping": {
+            "id": 3,
+            "name": "bed",
+            "isThing": true
+        }
+    },
+    {
+        "id": 8,
+        "name": "bench",
+        "mapping": {
+            "id": 6,
+            "name": "table",
+            "isThing": false
+        }
+    },
+    {
+        "id": 10,
+        "name": "bin",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 11,
+        "name": "blanket",
+        "mapping": {
+            "id": 3,
+            "name": "bed",
+            "isThing": true
+        }
+    },
+    {
+        "id": 12,
+        "name": "blinds",
+        "mapping": {
+            "id": 8,
+            "name": "window",
+            "isThing": false
+        }
+    },
+    {
+        "id": 13,
+        "name": "book",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 14,
+        "name": "bottle",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 15,
+        "name": "box",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 16,
+        "name": "bowl",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 17,
+        "name": "camera",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 18,
+        "name": "cabinet",
+        "mapping": {
+            "id": 2,
+            "name": "cabinet",
+            "isThing": false
+        }
+    },
+    {
+        "id": 19,
+        "name": "candle",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 20,
+        "name": "chair",
+        "mapping": {
+            "id": 4,
+            "name": "chair",
+            "isThing": true
+        }
+    },
+    {
+        "id": 22,
+        "name": "clock",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 23,
+        "name": "cloth",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 26,
+        "name": "comforter",
+        "mapping": {
+            "id": 3,
+            "name": "bed",
+            "isThing": true
+        }
+    },
+    {
+        "id": 29,
+        "name": "cushion",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 31,
+        "name": "ceiling",
+        "mapping": {
+            "id": 12,
+            "name": "ceiling",
+            "isThing": false
+        }
+    },
+    {
+        "id": 34,
+        "name": "desk",
+        "mapping": {
+            "id": 6,
+            "name": "table",
+            "isThing": false
+        }
+    },
+    {
+        "id": 35,
+        "name": "desk-organizer",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 37,
+        "name": "door",
+        "mapping": {
+            "id": 7,
+            "name": "door",
+            "isThing": false
+        }
+    },
+    {
+        "id": 40,
+        "name": "floor",
+        "mapping": {
+            "id": 1,
+            "name": "floor",
+            "isThing": false
+        }
+    },
+    {
+        "id": 44,
+        "name": "indoor-plant",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 47,
+        "name": "lamp",
+        "mapping": {
+            "id": 18,
+            "name": "lamp",
+            "isThing": false
+        }
+    },
+    {
+        "id": 52,
+        "name": "monitor",
+        "mapping": {
+            "id": 14,
+            "name": "television",
+            "isThing": true
+        }
+    },
+    {
+        "id": 54,
+        "name": "nightstand",
+        "mapping": {
+            "id": 2,
+            "name": "cabinet",
+            "isThing": false
+        }
+    },
+    {
+        "id": 56,
+        "name": "panel",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 59,
+        "name": "picture",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 60,
+        "name": "pillar",
+        "mapping": {
+            "id": 0,
+            "name": "wall",
+            "isThing": false
+        }
+    },
+    {
+        "id": 61,
+        "name": "pillow",
+        "mapping": {
+            "id": 3,
+            "name": "bed",
+            "isThing": true
+        }
+    },
+    {
+        "id": 62,
+        "name": "pipe",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 63,
+        "name": "plant-stand",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 64,
+        "name": "plate",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 65,
+        "name": "pot",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 70,
+        "name": "sculpture",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 71,
+        "name": "shelf",
+        "mapping": {
+            "id": 10,
+            "name": "shelves",
+            "isThing": false
+        }
+    },
+    {
+        "id": 76,
+        "name": "sofa",
+        "mapping": {
+            "id": 5,
+            "name": "sofa",
+            "isThing": true
+        }
+    },
+    {
+        "id": 78,
+        "name": "stool",
+        "mapping": {
+            "id": 4,
+            "name": "chair",
+            "isThing": true
+        }
+    },
+    {
+        "id": 79,
+        "name": "switch",
+        "mapping": {
+            "id": 0,
+            "name": "wall",
+            "isThing": false
+        }
+    },
+    {
+        "id": 80,
+        "name": "table",
+        "mapping": {
+            "id": 6,
+            "name": "table",
+            "isThing": false
+        }
+    },
+    {
+        "id": 82,
+        "name": "tablet",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 83,
+        "name": "tissue-paper",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 87,
+        "name": "tv-screen",
+        "mapping": {
+            "id": 14,
+            "name": "television",
+            "isThing": true
+        }
+    },
+    {
+        "id": 88,
+        "name": "tv-stand",
+        "mapping": {
+            "id": 2,
+            "name": "cabinet",
+            "isThing": false
+        }
+    },
+    {
+        "id": 91,
+        "name": "vase",
+        "mapping": {
+            "id": 20,
+            "name": "otherprop",
+            "isThing": false
+        }
+    },
+    {
+        "id": 92,
+        "name": "vent",
+        "mapping": {
+            "id": 12,
+            "name": "ceiling",
+            "isThing": false
+        }
+    },
+    {
+        "id": 93,
+        "name": "wall",
+        "mapping": {
+            "id": 0,
+            "name": "wall",
+            "isThing": false
+        }
+    },
+    {
+        "id": 95,
+        "name": "wall-plug",
+        "mapping": {
+            "id": 0,
+            "name": "wall",
+            "isThing": false
+        }
+    },
+    {
+        "id": 97,
+        "name": "window",
+        "mapping": {
+            "id": 8,
+            "name": "window",
+            "isThing": false
+        }
+    },
+    {
+        "id": 98,
+        "name": "rug",
+        "mapping": {
+            "id": 1,
+            "name": "floor",
+            "isThing": false
+        }
+    }
+]

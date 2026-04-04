@@ -1,0 +1,507 @@
+[
+    {
+        "id": 1,
+        "name": "backpack",
+        "isStuff": false
+    },
+    {
+        "id": 2,
+        "name": "base-cabinet",
+        "isStuff": false
+    },
+    {
+        "id": 3,
+        "name": "basket",
+        "isStuff": false
+    },
+    {
+        "id": 4,
+        "name": "bathtub",
+        "isStuff": false
+    },
+    {
+        "id": 5,
+        "name": "beam",
+        "isStuff": true
+    },
+    {
+        "id": 6,
+        "name": "beanbag",
+        "isStuff": false
+    },
+    {
+        "id": 7,
+        "name": "bed",
+        "isStuff": false
+    },
+    {
+        "id": 8,
+        "name": "bench",
+        "isStuff": false
+    },
+    {
+        "id": 9,
+        "name": "bike",
+        "isStuff": false
+    },
+    {
+        "id": 10,
+        "name": "bin",
+        "isStuff": false
+    },
+    {
+        "id": 11,
+        "name": "blanket",
+        "isStuff": false
+    },
+    {
+        "id": 12,
+        "name": "blinds",
+        "isStuff": true
+    },
+    {
+        "id": 13,
+        "name": "book",
+        "isStuff": false
+    },
+    {
+        "id": 14,
+        "name": "bottle",
+        "isStuff": false
+    },
+    {
+        "id": 15,
+        "name": "box",
+        "isStuff": false
+    },
+    {
+        "id": 16,
+        "name": "bowl",
+        "isStuff": false
+    },
+    {
+        "id": 17,
+        "name": "camera",
+        "isStuff": false
+    },
+    {
+        "id": 18,
+        "name": "cabinet",
+        "isStuff": false
+    },
+    {
+        "id": 19,
+        "name": "candle",
+        "isStuff": false
+    },
+    {
+        "id": 20,
+        "name": "chair",
+        "isStuff": false
+    },
+    {
+        "id": 21,
+        "name": "chopping-board",
+        "isStuff": false
+    },
+    {
+        "id": 22,
+        "name": "clock",
+        "isStuff": false
+    },
+    {
+        "id": 23,
+        "name": "cloth",
+        "isStuff": false
+    },
+    {
+        "id": 24,
+        "name": "clothing",
+        "isStuff": false
+    },
+    {
+        "id": 25,
+        "name": "coaster",
+        "isStuff": false
+    },
+    {
+        "id": 26,
+        "name": "comforter",
+        "isStuff": false
+    },
+    {
+        "id": 27,
+        "name": "computer-keyboard",
+        "isStuff": false
+    },
+    {
+        "id": 28,
+        "name": "cup",
+        "isStuff": false
+    },
+    {
+        "id": 29,
+        "name": "cushion",
+        "isStuff": false
+    },
+    {
+        "id": 30,
+        "name": "curtain",
+        "isStuff": true
+    },
+    {
+        "id": 31,
+        "name": "ceiling",
+        "isStuff": true
+    },
+    {
+        "id": 32,
+        "name": "cooktop",
+        "isStuff": false
+    },
+    {
+        "id": 33,
+        "name": "countertop",
+        "isStuff": true
+    },
+    {
+        "id": 34,
+        "name": "desk",
+        "isStuff": false
+    },
+    {
+        "id": 35,
+        "name": "desk-organizer",
+        "isStuff": false
+    },
+    {
+        "id": 36,
+        "name": "desktop-computer",
+        "isStuff": false
+    },
+    {
+        "id": 37,
+        "name": "door",
+        "isStuff": false
+    },
+    {
+        "id": 38,
+        "name": "exercise-ball",
+        "isStuff": false
+    },
+    {
+        "id": 39,
+        "name": "faucet",
+        "isStuff": false
+    },
+    {
+        "id": 40,
+        "name": "floor",
+        "isStuff": true
+    },
+    {
+        "id": 41,
+        "name": "handbag",
+        "isStuff": false
+    },
+    {
+        "id": 42,
+        "name": "hair-dryer",
+        "isStuff": false
+    },
+    {
+        "id": 43,
+        "name": "handrail",
+        "isStuff": true
+    },
+    {
+        "id": 44,
+        "name": "indoor-plant",
+        "isStuff": false
+    },
+    {
+        "id": 45,
+        "name": "knife-block",
+        "isStuff": false
+    },
+    {
+        "id": 46,
+        "name": "kitchen-utensil",
+        "isStuff": false
+    },
+    {
+        "id": 47,
+        "name": "lamp",
+        "isStuff": false
+    },
+    {
+        "id": 48,
+        "name": "laptop",
+        "isStuff": false
+    },
+    {
+        "id": 49,
+        "name": "major-appliance",
+        "isStuff": false
+    },
+    {
+        "id": 50,
+        "name": "mat",
+        "isStuff": true
+    },
+    {
+        "id": 51,
+        "name": "microwave",
+        "isStuff": false
+    },
+    {
+        "id": 52,
+        "name": "monitor",
+        "isStuff": false
+    },
+    {
+        "id": 53,
+        "name": "mouse",
+        "isStuff": false
+    },
+    {
+        "id": 54,
+        "name": "nightstand",
+        "isStuff": false
+    },
+    {
+        "id": 55,
+        "name": "pan",
+        "isStuff": false
+    },
+    {
+        "id": 56,
+        "name": "panel",
+        "isStuff": true
+    },
+    {
+        "id": 57,
+        "name": "paper-towel",
+        "isStuff": false
+    },
+    {
+        "id": 58,
+        "name": "phone",
+        "isStuff": false
+    },
+    {
+        "id": 59,
+        "name": "picture",
+        "isStuff": false
+    },
+    {
+        "id": 60,
+        "name": "pillar",
+        "isStuff": true
+    },
+    {
+        "id": 61,
+        "name": "pillow",
+        "isStuff": false
+    },
+    {
+        "id": 62,
+        "name": "pipe",
+        "isStuff": true
+    },
+    {
+        "id": 63,
+        "name": "plant-stand",
+        "isStuff": false
+    },
+    {
+        "id": 64,
+        "name": "plate",
+        "isStuff": false
+    },
+    {
+        "id": 65,
+        "name": "pot",
+        "isStuff": false
+    },
+    {
+        "id": 66,
+        "name": "rack",
+        "isStuff": false
+    },
+    {
+        "id": 67,
+        "name": "refrigerator",
+        "isStuff": false
+    },
+    {
+        "id": 68,
+        "name": "remote-control",
+        "isStuff": false
+    },
+    {
+        "id": 69,
+        "name": "scarf",
+        "isStuff": false
+    },
+    {
+        "id": 70,
+        "name": "sculpture",
+        "isStuff": false
+    },
+    {
+        "id": 71,
+        "name": "shelf",
+        "isStuff": false
+    },
+    {
+        "id": 72,
+        "name": "shoe",
+        "isStuff": false
+    },
+    {
+        "id": 73,
+        "name": "shower-stall",
+        "isStuff": false
+    },
+    {
+        "id": 74,
+        "name": "sink",
+        "isStuff": false
+    },
+    {
+        "id": 75,
+        "name": "small-appliance",
+        "isStuff": false
+    },
+    {
+        "id": 76,
+        "name": "sofa",
+        "isStuff": false
+    },
+    {
+        "id": 77,
+        "name": "stair",
+        "isStuff": true
+    },
+    {
+        "id": 78,
+        "name": "stool",
+        "isStuff": false
+    },
+    {
+        "id": 79,
+        "name": "switch",
+        "isStuff": false
+    },
+    {
+        "id": 80,
+        "name": "table",
+        "isStuff": false
+    },
+    {
+        "id": 81,
+        "name": "table-runner",
+        "isStuff": true
+    },
+    {
+        "id": 82,
+        "name": "tablet",
+        "isStuff": false
+    },
+    {
+        "id": 83,
+        "name": "tissue-paper",
+        "isStuff": false
+    },
+    {
+        "id": 84,
+        "name": "toilet",
+        "isStuff": false
+    },
+    {
+        "id": 85,
+        "name": "toothbrush",
+        "isStuff": false
+    },
+    {
+        "id": 86,
+        "name": "towel",
+        "isStuff": false
+    },
+    {
+        "id": 87,
+        "name": "tv-screen",
+        "isStuff": false
+    },
+    {
+        "id": 88,
+        "name": "tv-stand",
+        "isStuff": false
+    },
+    {
+        "id": 89,
+        "name": "umbrella",
+        "isStuff": false
+    },
+    {
+        "id": 90,
+        "name": "utensil-holder",
+        "isStuff": false
+    },
+    {
+        "id": 91,
+        "name": "vase",
+        "isStuff": false
+    },
+    {
+        "id": 92,
+        "name": "vent",
+        "isStuff": true
+    },
+    {
+        "id": 93,
+        "name": "wall",
+        "isStuff": true
+    },
+    {
+        "id": 94,
+        "name": "wall-cabinet",
+        "isStuff": false
+    },
+    {
+        "id": 95,
+        "name": "wall-plug",
+        "isStuff": false
+    },
+    {
+        "id": 96,
+        "name": "wardrobe",
+        "isStuff": false
+    },
+    {
+        "id": 97,
+        "name": "window",
+        "isStuff": false
+    },
+    {
+        "id": 98,
+        "name": "rug",
+        "isStuff": true
+    },
+    {
+        "id": 99,
+        "name": "logo",
+        "isStuff": true
+    },
+    {
+        "id": 100,
+        "name": "bag",
+        "isStuff": false
+    },
+    {
+        "id": 101,
+        "name": "set-of-clothing",
+        "isStuff": false
+    }
+]
