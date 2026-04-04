@@ -59,6 +59,24 @@ def load_config(path, default_path=None):
     return cfg
 
 
+def resolve_scene_in_config(cfg, scene):
+    """Substitute ``{scene}`` placeholders in all string values of *cfg*.
+
+    Walks the config dict recursively and replaces every occurrence of the
+    literal string ``{scene}`` with *scene*.  This allows dataset-independent
+    configs where only the scene name varies (e.g. mask directory paths).
+
+    Args:
+        cfg (dict): Config dict to update in-place.
+        scene (str): Scene name to substitute, e.g. ``"room0"``.
+    """
+    for key, value in cfg.items():
+        if isinstance(value, dict):
+            resolve_scene_in_config(value, scene)
+        elif isinstance(value, str):
+            cfg[key] = value.replace("{scene}", scene)
+
+
 def update_recursive(dict1, dict2):
     """
     Update two config dictionaries recursively. dict1 get masked by dict2, and we retuen dict1.
