@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
@@ -21,6 +22,36 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
 
     Background tensor (bg_color) must be on GPU!
     """
+
+    # Some builds of the CUDA rasterizer can trigger illegal memory access
+    # when invoked with an empty point set. Provide a safe fallback that
+    # returns correctly-shaped tensors.
+    if pc.get_xyz.shape[0] == 0:
+        H = int(viewpoint_camera.image_height)
+        W = int(viewpoint_camera.image_width)
+        rendered_image = bg_color.view(3, 1, 1).expand(3, H, W).contiguous()
+        rendered_features = empty_ins_feats.view(
+            -1, 1, 1).expand(-1, H, W).contiguous()
+        rendered_expected_depth = torch.zeros(
+            (1, H, W), device=bg_color.device, dtype=torch.float32)
+        alpha = torch.zeros(
+            (1, H, W), device=bg_color.device, dtype=torch.float32)
+        radii = torch.empty((0,), device=bg_color.device, dtype=torch.float32)
+        screenspace_points = torch.empty(
+            (0, 3), device=bg_color.device, dtype=pc.get_xyz.dtype, requires_grad=True)
+        try:
+            screenspace_points.retain_grad()
+        except Exception:
+            pass
+        return {
+            "render": rendered_image,
+            "depth": rendered_expected_depth,
+            "viewspace_points": screenspace_points,
+            "visibility_filter": torch.empty((0,), device=bg_color.device, dtype=torch.bool),
+            "radii": radii,
+            "alpha": alpha,
+            "rendered_features": rendered_features,
+        }
 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -45,7 +76,7 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
         sh_degree=pc.active_sh_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=False
+        debug=(os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1"),
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)

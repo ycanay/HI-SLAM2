@@ -48,7 +48,7 @@ opt_params:
   pose_lr: 0.0001
   position_lr_init: 0.00016
   position_lr_final: 0.0000016
-  position_lr_max_steps: 2000
+  position_lr_max_steps: 5000
   feature_lr: 0.0025
   opacity_lr: 0.05
   ins_feature_lr: 0.01
@@ -57,14 +57,25 @@ opt_params:
   percent_dense: 0.01
   lambda_dssim: 0.2
   densify_grad_threshold: 0.0002
-  lambda_cohesion: 0.0
+  lambda_cohesion: 0.01
   ins_feat_optimization_per_step: 5
 masks:
   source: "sam3" # options: sam3 | mask2former (mas2former alias supported)
   network: "facebook/mask2former-swin-large-coco-panoptic"
   mask2former_network: "facebook/mask2former-swin-large-coco-panoptic"
-  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/room0/sam_masks/"
-  sam3_masks_dir: "/storage/user/ayu/repos/sam3/sam3/data/room0/masks/"
+  sam_masks_dir: "/storage/user/ayu/repos/sam2/notebooks/replica/office1/sam_masks/"
+  sam3_masks_dir: "/storage/user/ayu/repos/sam3/sam3/data/office1/masks/"
   mask2former_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/outputs/masks/mask2former/"
   no_classes: 101
+  clustering:
+    min_cluster_size: 100
+    # NeRF-style positional encoding for Gaussian xyz in clustering.
+    # Increasing posenc dims makes position contribute more (vs ins_feat).
+    posenc_num_freqs: 0
+    posenc_include_input: false
+    posenc_log_sampling: false
+    posenc_normalize_positions: true
+    # Relative weights after per-block standardization.
+    pos_weight: 1.0
+    ins_weight: 1.0
 mask_cache_max_frames: 500

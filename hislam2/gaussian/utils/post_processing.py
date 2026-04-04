@@ -7,6 +7,68 @@ from sklearn.neighbors import NearestNeighbors
 from collections import Counter
 import numpy as np
 
+
+def _standardize_np(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    x = x - x.mean(axis=0, keepdims=True)
+    x = x / (x.std(axis=0, keepdims=True) + eps)
+    return x
+
+
+def nerf_positional_encoding_np(
+    positions: np.ndarray,
+    num_frequencies: int = 6,
+    *,
+    include_input: bool = True,
+    log_sampling: bool = True,
+    normalize_positions: bool = True,
+    eps: float = 1e-9,
+) -> np.ndarray:
+    """NeRF-style positional encoding for 3D positions.
+
+    Output layout is `[x,y,z] (optional) + [sin(pi*2^k*p), cos(pi*2^k*p)]` for k in [0..L-1].
+    If `normalize_positions=True`, positions are min-max normalized to [-1, 1] per axis.
+
+    Args:
+        positions: (N, 3) array.
+        num_frequencies: number of frequency bands (L). If 0, returns (N, 0) empty array.
+        include_input: whether to include raw xyz in the output.
+        log_sampling: use powers of two frequencies as in NeRF.
+        normalize_positions: min-max normalize to [-1, 1] per axis before encoding.
+    """
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError(
+            f"positions must have shape (N, 3), got {positions.shape}")
+    if num_frequencies <= 0:
+        return positions[:, :0]  # (N, 0)
+
+    pos = positions.astype(np.float32, copy=False)
+    if normalize_positions:
+        pmin = pos.min(axis=0, keepdims=True)
+        pmax = pos.max(axis=0, keepdims=True)
+        pos = (pos - pmin) / (pmax - pmin + eps)  # [0, 1]
+        pos = pos * 2.0 - 1.0  # [-1, 1]
+
+    if log_sampling:
+        freqs = 2.0 ** np.arange(num_frequencies, dtype=np.float32)
+    else:
+        freqs = np.linspace(1.0, 2.0 ** (num_frequencies - 1),
+                            num_frequencies, dtype=np.float32)
+
+    # (1, L, 1) so broadcasting works with (N, 1, 3)
+    freqs = freqs[None, :, None]
+    pos_exp = pos[:, None, :]  # (N, 1, 3)
+
+    args = np.pi * freqs * pos_exp  # (N, L, 3)
+    sin = np.sin(args)
+    cos = np.cos(args)
+    enc = np.concatenate([sin, cos], axis=2)  # (N, L, 6)
+    enc = enc.reshape(pos.shape[0], -1)  # (N, 6L)
+
+    if include_input:
+        return np.concatenate([pos, enc], axis=1)
+    return enc
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel('INFO')
 FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -252,7 +314,18 @@ def create_clusters_iterative(ins_feats, gaussian_pos, num_iterations=5, num_ini
     return new_labels, merged_clusters
 
 
-def cluster_hdbscan(ins_feats: torch.Tensor, gaussian_pos: torch.Tensor, min_cluster_size: int = 20):
+def cluster_hdbscan(
+    ins_feats: torch.Tensor,
+    gaussian_pos: torch.Tensor,
+    min_cluster_size: int = 20,
+    *,
+    posenc_num_freqs: int = 0,
+    posenc_include_input: bool = True,
+    posenc_log_sampling: bool = True,
+    posenc_normalize_positions: bool = True,
+    pos_weight: float = 1.0,
+    ins_weight: float = 1.0,
+):
     """
     Clusters instance features using HDBSCAN.
 
@@ -264,13 +337,38 @@ def cluster_hdbscan(ins_feats: torch.Tensor, gaussian_pos: torch.Tensor, min_clu
     Returns:
         torch.Tensor: Cluster labels for each point.
     """
-    ins_feats_np, gaussian_pos_np = ins_feats.cpu().numpy(), gaussian_pos.cpu().numpy()
+    ins_feats_np = ins_feats.detach().cpu().numpy()
+    gaussian_pos_np = gaussian_pos.detach().cpu().numpy()
+
+    # Backward-compatible path: no positional encoding + default weights.
+    # Keep the original joint-standardization behavior.
+    if (posenc_num_freqs is None or int(posenc_num_freqs) <= 0) and float(pos_weight) == 1.0 and float(ins_weight) == 1.0:
+        concat_vector = np.concatenate(
+            (gaussian_pos_np.astype(np.float32, copy=False),
+             ins_feats_np.astype(np.float32, copy=False)),
+            axis=1,
+        )
+        concat_vector = _standardize_np(concat_vector)
+    else:
+        # Build positional part: raw xyz or NeRF positional encoding.
+        if posenc_num_freqs and int(posenc_num_freqs) > 0:
+            pos_part = nerf_positional_encoding_np(
+                gaussian_pos_np,
+                num_frequencies=int(posenc_num_freqs),
+                include_input=bool(posenc_include_input),
+                log_sampling=bool(posenc_log_sampling),
+                normalize_positions=bool(posenc_normalize_positions),
+            )
+        else:
+            pos_part = gaussian_pos_np.astype(np.float32, copy=False)
+
+        # Standardize blocks separately, then weight.
+        # This matters because joint-standardization cancels per-dimension weighting.
+        pos_part = _standardize_np(pos_part) * float(pos_weight)
+        ins_part = _standardize_np(ins_feats_np) * float(ins_weight)
+        concat_vector = np.concatenate((pos_part, ins_part), axis=1)
+
     clustering_algo = HDBSCAN(min_cluster_size=min_cluster_size)
-    concat_vector = np.concatenate(
-        (gaussian_pos_np, ins_feats_np), axis=1)
-    concat_vector = concat_vector - concat_vector.mean(axis=0, keepdims=True)
-    concat_vector = concat_vector / \
-        (concat_vector.std(axis=0, keepdims=True) + 1e-6)
     clustering_algo.fit_predict(concat_vector)
     clusters = clustering_algo.labels_
     clusters = assign_noise_to_cluster(concat_vector, clusters)

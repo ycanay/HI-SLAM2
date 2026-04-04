@@ -335,7 +335,8 @@ class GaussianModel:
 
     @staticmethod
     def _sorted_ply_fields(vertex_data, prefix):
-        fields = [name for name in vertex_data.dtype.names if name.startswith(prefix)]
+        fields = [
+            name for name in vertex_data.dtype.names if name.startswith(prefix)]
         return sorted(fields, key=lambda name: int(name.rsplit("_", 1)[-1]))
 
     def save_ply(self, path):
@@ -435,6 +436,15 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        # The CUDA rasterizer used in this project can crash (illegal memory
+        # access) if invoked with an empty Gaussian set. Ensure pruning always
+        # keeps at least one point.
+        if valid_points_mask.numel() > 0 and int(valid_points_mask.sum().item()) == 0:
+            with torch.no_grad():
+                opacities = self.get_opacity
+                if opacities.numel() > 0:
+                    keep_idx = int(torch.argmax(opacities.view(-1)).item())
+                    valid_points_mask[keep_idx] = True
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -678,7 +688,8 @@ class GaussianModel:
                 array = np.empty((vertex_count, 0), dtype=np.float32)
             else:
                 array = np.stack(
-                    [np.asarray(vertex[name], dtype=np.float32) for name in field_names],
+                    [np.asarray(vertex[name], dtype=np.float32)
+                     for name in field_names],
                     axis=1,
                 )
             if expected_cols is not None:
@@ -709,8 +720,10 @@ class GaussianModel:
                 f_rest.reshape(vertex_count, -1, 3).transpose(0, 2, 1)
             )
         else:
-            self._features_rest = torch.empty((vertex_count, 3, 0), dtype=torch.float32)
-        self._opacity = torch.from_numpy(stack_fields(["opacity"], expected_cols=1))
+            self._features_rest = torch.empty(
+                (vertex_count, 3, 0), dtype=torch.float32)
+        self._opacity = torch.from_numpy(
+            stack_fields(["opacity"], expected_cols=1))
         self._ins_feat = torch.from_numpy(
             stack_fields(ins_feat_fields, expected_cols=INSTANCE_FEAT_DIM)
         )
