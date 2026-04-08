@@ -145,13 +145,17 @@ def eval_rendering(
         )
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background, empty_ins_feats)
-        rendered_image = torch.clamp(rendering["render"], 0.0, 1.0)
-        ins_feat = torch.clamp(rendering["rendered_features"], 0.0, 1.0)
-        depth = rendering["depth"].detach().squeeze().cpu().numpy()
+        pkg = render(frame, gaussians, background, empty_ins_feats)
+        pkg_image, pkg_depth, pkg_viewspace_pts, pkg_vis_filter, pkg_radii, pkg_ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
+            )
+        rendered_image = torch.clamp(pkg_image, 0.0, 1.0)
+        ins_feat = torch.clamp(pkg_ins_feat, 0.0, 1.0)
+        depth = pkg_depth.detach().squeeze().cpu().numpy()
 
         instance_ids = _compute_instance_ids(
-            rendering["rendered_features"], gaussians.cluster_features)
+            pkg_ins_feat, gaussians.cluster_features)
 
         if gtdepthdir is not None and idx in gtdepth_cache:
             gtdepth = cv2.resize(
@@ -209,10 +213,14 @@ def eval_rendering_kf(
     for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background, empty_ins_feats)
+        pkg = render(frame, gaussians, background, empty_ins_feats)
+        pkg_image, pkg_depth, pkg_viewspace_pts, pkg_vis_filter, pkg_radii, pkg_ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
+            )
         image = torch.clamp(
             torch.exp(frame.exposure_a) *
-            rendering["render"] + frame.exposure_b,
+            pkg_image + frame.exposure_b,
             0.0, 1.0
         )
 
