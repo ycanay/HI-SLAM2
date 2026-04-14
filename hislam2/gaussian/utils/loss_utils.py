@@ -120,6 +120,10 @@ def separation_loss(feat_mean_stack):
     """
     N, _ = feat_mean_stack.shape
 
+    # No pairwise separation signal when there are fewer than 2 masks.
+    if N < 2:
+        return feat_mean_stack.new_zeros(())
+
     # expand feat_mean_stack[N, 6] to [N, N, 6]
     feat_expanded = feat_mean_stack.unsqueeze(1).expand(-1, N, -1)
     feat_transposed = feat_mean_stack.unsqueeze(0).expand(N, -1, -1)
@@ -154,15 +158,15 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
 
     Args:
         gt_masks (Tensor): [num_masks, H1, W1] boolean instance masks
-        feat_map (Tensor): [6, H, W] feature map with 6 channels
-        feature_mean (Tensor): [num_masks, 6] mean features for each mask
+        feat_map (Tensor): [C, H, W] feature map with C channels
+        feature_mean (Tensor): [num_masks, C] mean features for each mask
 
     Returns:
         Tensor: cohesion loss
     """
     num_masks, mask_h, mask_w = gt_masks.shape
     C, H, W = feat_map.shape
-    assert C == 6, "Feature map must have 6 channels."
+    assert feature_mean.shape[1] == C, "Feature map and mean features must match in channel count."
 
     # Resize masks if needed
     if (mask_h, mask_w) != (H, W):
@@ -170,22 +174,30 @@ def cohesion_loss(gt_masks, feat_map, feature_mean):
             gt_masks.unsqueeze(1).float(), size=(H, W), mode='nearest')
         gt_masks = gt_masks.squeeze(1)  # [num_masks, H, W]
 
-    # Expand tensors
-    feat_exp = feat_map.unsqueeze(0).expand(
-        num_masks, -1, -1, -1)       # [num_masks, 6, H, W]
-    # [num_masks, 6, H, W]
-    mask_exp = gt_masks.unsqueeze(1).expand(-1, C, -1, -1)
+    # Cohesion should only measure error *inside* each mask and weight masks
+    # equally (so large masks don't dominate). Use chunking over masks to
+    # avoid large intermediate tensors.
 
-    # Apply masks to features
-    masked_feats = ele_multip_in_chunks(feat_exp, mask_exp, 2)
+    gt_masks_f = gt_masks.float()
+    mask_counts = gt_masks_f.sum(dim=(1, 2)).clamp(min=1.0)  # [num_masks]
 
-    # Expand mean feature per mask to spatial layout
-    mean_feats = feature_mean.unsqueeze(2).unsqueeze(3).expand(-1, -1, H, W)
-    mean_feats_masked = ele_multip_in_chunks(mean_feats, mask_exp, 2)
+    total = feat_map.new_zeros(())
+    chunk_size = 2
+    feat = feat_map.unsqueeze(0)  # [1, C, H, W]
 
-    # Mean L1 loss between masked features and masked means
-    l1 = (torch.abs(masked_feats - mean_feats_masked)).mean()
-    return l1
+    for start in range(0, num_masks, chunk_size):
+        end = min(start + chunk_size, num_masks)
+        masks = gt_masks_f[start:end]  # [m, H, W]
+        means = feature_mean[start:end]  # [m, C]
+
+        diff = torch.abs(feat - means[:, :, None, None])  # [m, C, H, W]
+        diff = diff * masks[:, None, :, :]
+
+        per_mask_sum = diff.sum(dim=(1, 2, 3))
+        per_mask_mean = per_mask_sum / (mask_counts[start:end] * float(C))
+        total = total + per_mask_mean.sum()
+
+    return total / float(num_masks)
 
 
 def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors):
@@ -193,7 +205,7 @@ def kl_regularization_loss(ins_feat, gaussians, num_of_samples, num_of_neighbors
     Regularization loss over instance features using KL divergence between softmaxed features.
 
     Args:
-        ins_feat (Tensor): [N, 6] instance features
+        ins_feat (Tensor): [N, D] instance features
         gaussians (Tensor): [N, 3] positions (used for nearest neighbor search)
         num_of_samples (int): number of sampled points (m)
         num_of_neighbors (int): number of nearest neighbors (k)

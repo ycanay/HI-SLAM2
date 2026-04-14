@@ -9,7 +9,8 @@ from hislam2.motion_filter import MotionFilter
 from hislam2.track_frontend import TrackFrontend
 from hislam2.track_backend import TrackBackend
 from hislam2.util.trajectory_filler import PoseTrajectoryFiller
-from hislam2.util.utils import load_config
+from pathlib import Path
+from hislam2.util.utils import load_config, resolve_scene_in_config
 
 from collections import OrderedDict
 from torch.multiprocessing import Process, Queue
@@ -22,6 +23,8 @@ class Hi2:
         super(Hi2, self).__init__()
         self.load_weights(args.weights)
         self.config = config = load_config(args.config)
+        scene_name = Path(args.imagedir).parent.name
+        resolve_scene_in_config(config, scene_name)
         self.args = args
         self.images = {}
 

@@ -29,6 +29,9 @@ from hislam2.gaussian.utils.graphics_utils import BasicPointCloud, getWorld2View
 from hislam2.gaussian.utils.sh_utils import RGB2SH
 
 
+INSTANCE_FEAT_DIM = 12
+
+
 class GaussianModel:
     def __init__(self, sh_degree: int, config=None):
         self.active_sh_degree = 0
@@ -196,7 +199,10 @@ class GaussianModel:
             )
         )
         ins_feat = torch.rand(
-            (fused_point_cloud.shape[0], 6), dtype=torch.float, device="cuda")
+            (fused_point_cloud.shape[0], INSTANCE_FEAT_DIM),
+            dtype=torch.float,
+            device="cuda",
+        )
 
         return fused_point_cloud, features, scales, rots, opacities, ins_feat
 
@@ -327,6 +333,12 @@ class GaussianModel:
             l.append("rot_{}".format(i))
         return l
 
+    @staticmethod
+    def _sorted_ply_fields(vertex_data, prefix):
+        fields = [
+            name for name in vertex_data.dtype.names if name.startswith(prefix)]
+        return sorted(fields, key=lambda name: int(name.rsplit("_", 1)[-1]))
+
     def save_ply(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -424,6 +436,15 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        # The CUDA rasterizer used in this project can crash (illegal memory
+        # access) if invoked with an empty Gaussian set. Ensure pruning always
+        # keeps at least one point.
+        if valid_points_mask.numel() > 0 and int(valid_points_mask.sum().item()) == 0:
+            with torch.no_grad():
+                opacities = self.get_opacity
+                if opacities.numel() > 0:
+                    keep_idx = int(torch.argmax(opacities.view(-1)).item())
+                    valid_points_mask[keep_idx] = True
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -658,54 +679,57 @@ class GaussianModel:
         self.denom[update_filter] += 1
 
     def load_from_ply(self, ply_path):
-        fields = [
-            'x', 'y', 'z',
-            'nx', 'ny', 'nz',
-            'f_dc_0', 'f_dc_1', 'f_dc_2',
-            'opacity',
-            'ins_feat_0', 'ins_feat_1', 'ins_feat_2',
-            'ins_feat_3', 'ins_feat_4', 'ins_feat_5',
-            'scale_0', 'scale_1', 'scale_2',
-            'rot_0', 'rot_1', 'rot_2', 'rot_3'
-        ]
+        plydata = PlyData.read(ply_path)
+        vertex = plydata["vertex"].data
+        vertex_count = len(vertex)
 
-        dtype = np.dtype([(name, 'f4') for name in fields])
+        def stack_fields(field_names, expected_cols=None):
+            if not field_names:
+                array = np.empty((vertex_count, 0), dtype=np.float32)
+            else:
+                array = np.stack(
+                    [np.asarray(vertex[name], dtype=np.float32)
+                     for name in field_names],
+                    axis=1,
+                )
+            if expected_cols is not None:
+                if array.shape[1] < expected_cols:
+                    padding = np.zeros(
+                        (vertex_count, expected_cols - array.shape[1]),
+                        dtype=np.float32,
+                    )
+                    array = np.concatenate((array, padding), axis=1)
+                elif array.shape[1] > expected_cols:
+                    array = array[:, :expected_cols]
+            return array
 
-        # Read header and find vertex count and byte offset
-        with open(ply_path, 'rb') as f:
-            header_lines = []
-            while True:
-                line = f.readline()
-                header_lines.append(line)
-                if line.strip() == b'end_header':
-                    break
+        f_dc_fields = self._sorted_ply_fields(vertex, "f_dc_")
+        f_rest_fields = self._sorted_ply_fields(vertex, "f_rest_")
+        ins_feat_fields = self._sorted_ply_fields(vertex, "ins_feat_")
+        scale_fields = self._sorted_ply_fields(vertex, "scale_")
+        rot_fields = self._sorted_ply_fields(vertex, "rot_")
 
-            # Decode and search for vertex count
-            vertex_count = 0
-            for line in header_lines:
-                if line.startswith(b'element vertex'):
-                    vertex_count = int(line.decode().split()[-1])
-                    break
-
-            # Sanity check
-            if vertex_count == 0:
-                raise ValueError(
-                    "Could not determine number of vertices from header.")
-
-            # Read binary data
-            data = np.fromfile(f, dtype=dtype, count=vertex_count)
-
-        # Structured array is now loaded
-        array_2d = np.vstack([data[field] for field in fields]).T
-        print(f"Loaded {len(data)} vertices.")
-        print(array_2d[0])
-        # Extract position data (x, y, z)
-        self._xyz = torch.Tensor(array_2d[:, :3])
-        normals = torch.Tensor(array_2d[:, 3:6])  # Extract normal data
-        # Extract spherical harmonics data
-        self._features_dc = torch.Tensor(array_2d[:, 6:9])
-        self._opacity = torch.Tensor(array_2d[:, 9])  # Extract opacity data
-        self._ins_feat = torch.Tensor(array_2d[:, 10:16])
-        self._scaling = torch.Tensor(array_2d[:, 16:19])  # Extract scale data
-        self._rotation = torch.Tensor(
-            array_2d[:, 19:23])  # Extract rotation data
+        self._xyz = torch.from_numpy(stack_fields(["x", "y", "z"]))
+        _ = stack_fields(["nx", "ny", "nz"])
+        self._features_dc = torch.from_numpy(
+            stack_fields(f_dc_fields, expected_cols=3)
+        ).unsqueeze(-1)
+        if f_rest_fields:
+            f_rest = stack_fields(f_rest_fields)
+            self._features_rest = torch.from_numpy(
+                f_rest.reshape(vertex_count, -1, 3).transpose(0, 2, 1)
+            )
+        else:
+            self._features_rest = torch.empty(
+                (vertex_count, 3, 0), dtype=torch.float32)
+        self._opacity = torch.from_numpy(
+            stack_fields(["opacity"], expected_cols=1))
+        self._ins_feat = torch.from_numpy(
+            stack_fields(ins_feat_fields, expected_cols=INSTANCE_FEAT_DIM)
+        )
+        self._scaling = torch.from_numpy(
+            stack_fields(scale_fields, expected_cols=3)
+        )
+        self._rotation = torch.from_numpy(
+            stack_fields(rot_fields, expected_cols=4)
+        )

@@ -9,10 +9,24 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
 import torch
 import math
+from typing import NamedTuple
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from hislam2.gaussian.scene.gaussian_model import GaussianModel
+
+
+class RenderPackage(NamedTuple):
+    """Typed container for all outputs of a single Gaussian rasterization call."""
+
+    image: torch.Tensor            # [3, H, W] rendered RGB
+    depth: torch.Tensor            # [1, H, W] expected depth
+    viewspace_points: torch.Tensor # [N, 3] screen-space means with gradients
+    visibility_filter: torch.Tensor # [N] bool — Gaussians with radii > 0
+    radii: torch.Tensor            # [N] screen-space radii
+    alpha: torch.Tensor            # [1, H, W] accumulated alpha
+    ins_feat: torch.Tensor         # [D, H, W] rendered instance features
 
 
 def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_ins_feats: torch.Tensor, scaling_modifier=1.0):
@@ -21,6 +35,36 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
 
     Background tensor (bg_color) must be on GPU!
     """
+
+    # Some builds of the CUDA rasterizer can trigger illegal memory access
+    # when invoked with an empty point set. Provide a safe fallback that
+    # returns correctly-shaped tensors.
+    if pc.get_xyz.shape[0] == 0:
+        H = int(viewpoint_camera.image_height)
+        W = int(viewpoint_camera.image_width)
+        rendered_image = bg_color.view(3, 1, 1).expand(3, H, W).contiguous()
+        rendered_features = empty_ins_feats.view(
+            -1, 1, 1).expand(-1, H, W).contiguous()
+        rendered_expected_depth = torch.zeros(
+            (1, H, W), device=bg_color.device, dtype=torch.float32)
+        alpha = torch.zeros(
+            (1, H, W), device=bg_color.device, dtype=torch.float32)
+        radii = torch.empty((0,), device=bg_color.device, dtype=torch.float32)
+        screenspace_points = torch.empty(
+            (0, 3), device=bg_color.device, dtype=pc.get_xyz.dtype, requires_grad=True)
+        try:
+            screenspace_points.retain_grad()
+        except Exception:
+            pass
+        return RenderPackage(
+            image=rendered_image,
+            depth=rendered_expected_depth,
+            viewspace_points=screenspace_points,
+            visibility_filter=torch.empty((0,), device=bg_color.device, dtype=torch.bool),
+            radii=radii,
+            alpha=alpha,
+            ins_feat=rendered_features,
+        )
 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -45,7 +89,7 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
         sh_degree=pc.active_sh_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=False
+        debug=(os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1"),
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -65,6 +109,9 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
     shs = pc.get_features
     colors_precomp = None
     ins_feat = pc.get_ins_feat
+    assert ins_feat.shape[1] == empty_ins_feats.shape[0], (
+        f"Instance feature dim mismatch: rendered {ins_feat.shape[1]} vs empty_ins_feats {empty_ins_feats.shape[0]}"
+    )
     rendered_image, rendered_features, radii, rendered_expected_depth, alpha = rasterizer(
         means3D=means3D,
         means2D=means2D,
@@ -81,10 +128,12 @@ def render(viewpoint_camera, pc: GaussianModel, bg_color: torch.Tensor, empty_in
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {"render": rendered_image,
-            "depth": rendered_expected_depth,
-            "viewspace_points": means2D,
-            "visibility_filter": radii > 0,
-            "radii": radii,
-            "alpha": alpha,
-            "rendered_features": rendered_features, }
+    return RenderPackage(
+        image=rendered_image,
+        depth=rendered_expected_depth,
+        viewspace_points=means2D,
+        visibility_filter=radii > 0,
+        radii=radii,
+        alpha=alpha,
+        ins_feat=rendered_features,
+    )

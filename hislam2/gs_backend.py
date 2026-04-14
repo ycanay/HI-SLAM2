@@ -4,8 +4,6 @@ import time
 import csv
 import json
 from typing import cast
-from collections import OrderedDict
-from pathlib import Path
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -28,7 +26,7 @@ from hislam2.gaussian.utils.loss_utils import (
     kl_regularization_loss,
     prediction_loss,
 )
-from hislam2.gaussian.scene.gaussian_model import GaussianModel
+from hislam2.gaussian.scene.gaussian_model import GaussianModel, INSTANCE_FEAT_DIM
 from hislam2.gaussian.utils.graphics_utils import getProjectionMatrix2
 from hislam2.gaussian.utils.slam_utils import (
     update_pose,
@@ -39,13 +37,7 @@ from hislam2.gaussian.utils.slam_utils import (
 from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
-from hislam2.gaussian.semantics.mask_generator import MaskGenerator
-from hislam2.gaussian.semantics.mask_reader import (
-    read_gt_masks,
-    read_sam3_masks,
-    sam_masks_semantic_image,
-    sam3_dict_to_tensor,
-)
+from hislam2.gaussian.semantics.mask_cache import MaskCache
 from hislam2.gaussian.semantics.predictor import Predictor
 from hislam2.gaussian.utils.post_processing import cluster_hdbscan
 
@@ -68,12 +60,6 @@ class GSBackEnd(mp.Process):
 
         self.opt_params = munchify(config["opt_params"])
         self.config["Training"]["monocular"] = False
-        self.mask_source = str(
-            self.config.get("masks", {}).get("source", "sam3")
-        ).lower()
-        if self.mask_source == "mas2former":
-            self.mask_source = "mask2former"
-        self.mask_generator = None
 
         # Gaussian model
         self.gaussians = GaussianModel(sh_degree=0, config=self.config)
@@ -81,8 +67,8 @@ class GSBackEnd(mp.Process):
         self.gaussians.training_setup(self.opt_params)
         self.background = torch.tensor(
             [0, 0, 0], dtype=torch.float32, device="cuda")
-        self.empty_ins_feats = torch.tensor(
-            [0, 0, 0, 0, 0, 0], dtype=torch.float32, device="cuda"
+        self.empty_ins_feats = torch.zeros(
+            (INSTANCE_FEAT_DIM,), dtype=torch.float32, device="cuda"
         )
 
         self.cameras_extent = 6.0
@@ -102,12 +88,10 @@ class GSBackEnd(mp.Process):
             self.predictor_optimizer, gamma=0.9
         )
 
-        # Mask cache: stores CPU tensors to avoid repeated HDD reads.
-        # Keys are tstamp ints; values are (sam_masks_cpu, sem_masks_cpu, sem_mask_ids_cpu).
-        # _mask_cache_max_size bounds memory use; oldest entries are evicted LRU-style.
-        self._mask_cache: OrderedDict = OrderedDict()
-        self._mask_cache_max_size: int = self.config.get(
-            "mask_cache_max_frames", 300
+        self.mask_cache = MaskCache(
+            config,
+            save_dir,
+            max_frames=config.get("mask_cache_max_frames", 300),
         )
 
         # Runtime analysis
@@ -254,19 +238,18 @@ class GSBackEnd(mp.Process):
             self.writer.add_scalar(tag, value, step)
 
     def log_instance_feats(self, tag, ins_feat, step):
-        """Log a 6-channel instance feature map as two normalised RGB images."""
+        """Log an instance feature map as normalised RGB image chunks."""
         if not self.writer:
             return
         C, H, W = ins_feat.shape
-        assert C == 6, f"Expected 6-channel feature map, got {C}"
+        assert C % 3 == 0, f"Expected channel count divisible by 3, got {C}"
         cpu = ins_feat.clone().cpu().detach()
-        t1, t2 = torch.split(cpu, 3, dim=0)
-        t1 = (t1 - t1.min()) / (t1.max() - t1.min() + 1e-5)
-        t2 = (t2 - t2.min()) / (t2.max() - t2.min() + 1e-5)
-        self.writer.add_image(
-            f"{tag}1", t1, global_step=step, dataformats="CHW")
-        self.writer.add_image(
-            f"{tag}2", t2, global_step=step, dataformats="CHW")
+        for idx, start in enumerate(range(0, C, 3), start=1):
+            chunk = cpu[start:start + 3]
+            chunk = (chunk - chunk.min()) / (chunk.max() - chunk.min() + 1e-5)
+            self.writer.add_image(
+                f"{tag}{idx}", chunk, global_step=step, dataformats="CHW"
+            )
         self.writer.flush()
 
     def log_rgb_images(self, tag, image, step):
@@ -286,131 +269,17 @@ class GSBackEnd(mp.Process):
 
     def _render(self, viewpoint):
         """Render *viewpoint* with the current Gaussians and return the full package."""
-        return render(viewpoint, self.gaussians, self.background, self.empty_ins_feats)
-
-    def _unpack_render_pkg(self, pkg):
-        """Unpack a render package into its seven components.
-
-        Returns:
-            (image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat)
-        """
-        return (
-            pkg["render"],
-            pkg["viewspace_points"],
-            pkg["visibility_filter"],
-            pkg["radii"],
-            pkg["depth"],
-            pkg["alpha"],
-            pkg["rendered_features"],
-        )
+        pkg = render(viewpoint, self.gaussians,
+                     self.background, self.empty_ins_feats)
+        if os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1":
+            # Force CUDA to report errors at the earliest possible point.
+            torch.cuda.synchronize()
+        return pkg
 
     # ------------------------------------------------------------------
     # Semantic helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _has_valid_masks(mask_tensor):
-        """Return True only for non-empty mask tensors with valid spatial size."""
-        return (
-            mask_tensor is not None
-            and isinstance(mask_tensor, torch.Tensor)
-            and mask_tensor.ndim == 3
-            and mask_tensor.shape[0] > 0
-            and mask_tensor.shape[1] > 0
-            and mask_tensor.shape[2] > 0
-        )
-
-    def _load_semantic_masks(self, tstamp):
-        """Load and GPU-transfer configured instance + semantic masks for *tstamp*.
-
-        CPU tensors are cached in ``self._mask_cache`` (keyed by *tstamp*) so
-        that repeated calls for the same frame skip all HDD I/O.  Only the
-        final ``.cuda()`` transfers happen on every call, which are cheap
-        compared to disk reads.
-
-        Returns:
-            sam_masks    (Tensor): Binary SAM instance masks  [N, H, W].
-            sem_masks    (Tensor | None): Semantically grouped masks.
-            sem_mask_ids (Tensor | None): Class label per semantic mask.
-        """
-        key = int(tstamp)
-
-        if key in self._mask_cache:
-            # Move to front (most-recently-used)
-            self._mask_cache.move_to_end(key)
-            sam_cpu, sem_cpu, ids_cpu = self._mask_cache[key]
-        else:
-            # Cache miss – read from HDD
-            masks_cfg = self.config.get("masks", {})
-            if self.mask_source == "sam3":
-                masks_dir = masks_cfg.get("sam3_masks_dir")
-            elif self.mask_source == "mask2former":
-                masks_dir = masks_cfg.get("mask2former_masks_dir")
-            else:
-                raise ValueError(
-                    f"Unsupported masks.source '{self.mask_source}'. "
-                    "Use 'sam3' or 'mask2former'."
-                )
-
-            if not masks_dir:
-                raise ValueError(
-                    f"Mask directory is not configured for masks.source='{self.mask_source}'."
-                )
-
-            frame_dir = Path(masks_dir) / f"frame{int(tstamp):06d}"
-            has_precomputed = (frame_dir / "masks.json").exists()
-
-            if self.mask_source == "mask2former" and not has_precomputed:
-                if self.mask_generator is None:
-                    self.mask_generator = MaskGenerator(
-                        self.config, self.save_dir)
-
-                viewpoint = self.viewpoints.get(int(tstamp), None)
-                if viewpoint is None:
-                    for vp in self.viewpoints.values():
-                        if int(vp.tstamp) == int(tstamp):
-                            viewpoint = vp
-                            break
-
-                if viewpoint is None:
-                    raise RuntimeError(
-                        f"No viewpoint found for tstamp={int(tstamp)} to run Mask2Former."
-                    )
-
-                sam_cpu, sem_cpu, ids_cpu = self.mask_generator.generate_and_save_masks(
-                    viewpoint
-                )
-            else:
-                sam_masks_dict = read_sam3_masks(tstamp, masks_dir)
-                sem_cpu, ids_cpu = sam_masks_semantic_image(
-                    sam_masks_dict, tstamp, masks_dir
-                )
-                sam_cpu = sam3_dict_to_tensor(sam_masks_dict)  # keep on CPU
-            # sem_cpu / ids_cpu are already CPU tensors (or None)
-
-            # Evict the least-recently-used entry if the cache is full
-            if len(self._mask_cache) >= self._mask_cache_max_size:
-                evicted_key, _ = self._mask_cache.popitem(last=False)
-                # Uncomment for debugging:
-                # Log(f"Mask cache evicted frame {evicted_key}")
-
-            self._mask_cache[key] = (sam_cpu, sem_cpu, ids_cpu)
-
-        # Treat empty masks as missing so downstream code can safely skip
-        # semantic terms on frames where SAM produced no valid output.
-        if not self._has_valid_masks(sam_cpu):
-            sam_cpu = None
-        if not self._has_valid_masks(sem_cpu):
-            sem_cpu = None
-        if ids_cpu is not None and ids_cpu.numel() == 0:
-            ids_cpu = None
-
-        # Transfer to GPU (non-blocking pinned copy is fastest, but a plain
-        # .cuda() is safe even when the tensor is not pinned)
-        sam_masks = sam_cpu.cuda() if sam_cpu is not None else None
-        sem_masks = sem_cpu.cuda() if sem_cpu is not None else None
-        sem_mask_ids = ids_cpu.cuda() if ids_cpu is not None else None
-        return sam_masks, sem_masks, sem_mask_ids
 
     def _compute_mask_feature_losses(
         self, ins_feat, sam_masks, sem_masks, sem_mask_ids
@@ -418,33 +287,37 @@ class GSBackEnd(mp.Process):
         """Compute instance-feature losses and return them individually.
 
         Returns a dict with keys ``s_loss``, ``c_loss``, ``r_loss``, ``p_loss``.
-        ``c_loss`` is ``None`` when *sem_masks* is ``None``;
+        ``c_loss`` is ``None`` only when there are no valid masks;
         ``p_loss`` is ``None`` when *sem_mask_ids* is ``None``.
         """
         # If SAM returned no valid masks for this frame, skip semantic losses.
-        if not self._has_valid_masks(sam_masks):
+        if not MaskCache.is_valid(sam_masks):
             zero = ins_feat.new_zeros(())
             return dict(s_loss=zero, c_loss=None, r_loss=zero, p_loss=None)
 
-        # Separation loss over SAM instance masks
-        sam_feat_mean = mask_feature_mean(ins_feat, sam_masks)
+        # Separation loss over SAM instance masks (instance part: last 6 dims)
+        ins_part_feat = ins_feat[6:]
+        sam_feat_mean = mask_feature_mean(ins_part_feat, sam_masks)
         s_loss = separation_loss(sam_feat_mean)
+        c_loss = cohesion_loss(sam_masks, ins_part_feat, sam_feat_mean)
 
-        # Cohesion loss over semantic masks (if available)
-        c_loss = None
-        sem_feat_mean = sam_feat_mean  # fallback used for prediction loss
+        # Optional separation loss over semantic masks (semantic part: first 6 dims)
+        sem_feat_mean = None
         if sem_masks is not None:
-            sem_feat_mean = mask_feature_mean(ins_feat, sem_masks)
-            c_loss = cohesion_loss(sem_masks, ins_feat, sem_feat_mean)
+            sem_part_feat = ins_feat[:6]
+            sem_feat_mean = mask_feature_mean(sem_part_feat, sem_masks)
+            s_loss = s_loss + separation_loss(sem_feat_mean)
+            c_loss = c_loss + \
+                cohesion_loss(sem_masks, sem_part_feat, sem_feat_mean)
 
         # Prediction loss (classification head)
         p_loss = None
-        if sem_mask_ids is not None:
+        if sem_masks is not None and sem_mask_ids is not None and sem_feat_mean is not None:
             valid_feat, valid_ids = self._filter_prediction_targets(
                 sem_feat_mean, sem_mask_ids
             )
             if valid_feat is not None and valid_ids is not None:
-                predictions = self.predictor(valid_feat)
+                predictions = self.predictor(valid_feat[:, :6])
                 p_loss = prediction_loss(predictions, valid_ids)
 
         # KL regularisation over the full Gaussian field
@@ -494,14 +367,48 @@ class GSBackEnd(mp.Process):
         self, viewspace_pts_list, vis_filter_list, radii_list
     ):
         """Accumulate max-radii and gradient stats across all rendered viewpoints."""
+        cuda_debug = os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1"
         for viewspace_pts, vis_filter, radii in zip(
             viewspace_pts_list, vis_filter_list, radii_list
         ):
+            if cuda_debug:
+                if not isinstance(vis_filter, torch.Tensor) or vis_filter.dtype is not torch.bool:
+                    raise TypeError(
+                        f"Expected visibility_filter to be a bool Tensor, got {type(vis_filter)} {getattr(vis_filter, 'dtype', None)}"
+                    )
+                if vis_filter.ndim != 1:
+                    raise ValueError(
+                        f"Expected visibility_filter to be 1D, got shape {tuple(vis_filter.shape)}")
+                if self.gaussians.max_radii2D.ndim != 1:
+                    raise ValueError(
+                        f"Expected max_radii2D to be 1D, got shape {tuple(self.gaussians.max_radii2D.shape)}"
+                    )
+                if vis_filter.shape[0] != self.gaussians.max_radii2D.shape[0]:
+                    raise ValueError(
+                        "visibility_filter length mismatch: "
+                        f"{vis_filter.shape[0]} vs max_radii2D {self.gaussians.max_radii2D.shape[0]}"
+                    )
+                if radii.ndim != 1:
+                    raise ValueError(
+                        f"Expected radii to be 1D, got shape {tuple(radii.shape)}")
+                if radii.shape[0] != vis_filter.shape[0]:
+                    raise ValueError(
+                        f"radii length mismatch: {radii.shape[0]} vs visibility_filter {vis_filter.shape[0]}"
+                    )
+                torch.cuda.synchronize()
+
             self.gaussians.max_radii2D[vis_filter] = torch.max(
                 self.gaussians.max_radii2D[vis_filter],
                 radii[vis_filter],
             )
+
+            if cuda_debug:
+                torch.cuda.synchronize()
+
             self.gaussians.add_densification_stats(viewspace_pts, vis_filter)
+
+            if cuda_debug:
+                torch.cuda.synchronize()
 
     # ------------------------------------------------------------------
     # Public API
@@ -621,7 +528,7 @@ class GSBackEnd(mp.Process):
         )
         # Warm the CPU mask cache for this keyframe now so that by the time the
         # refinement loop starts every frame is already resident in RAM.
-        self._load_semantic_masks(viewpoint.tstamp)
+        self.mask_cache.load(viewpoint.tstamp, self.viewpoints)
 
     def reset(self):
         self.iteration_count = 0
@@ -644,9 +551,9 @@ class GSBackEnd(mp.Process):
             render_start = time.perf_counter()
             pkg = self._render(viewpoint)
             rendering_scene_s = time.perf_counter() - render_start
-
-            image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
-                self._unpack_render_pkg(pkg)
+            image, depth, viewspace_pts, vis_filter, radii, ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
             )
 
             loss_start = time.perf_counter()
@@ -663,20 +570,23 @@ class GSBackEnd(mp.Process):
             c_loss = None
             if optimize_sem:
                 mask_start = time.perf_counter()
-                sam_masks, sem_masks, _sem_ids = self._load_semantic_masks(
-                    viewpoint.tstamp
+                sam_masks, sem_masks, _sem_ids = self.mask_cache.load(
+                    viewpoint.tstamp, self.viewpoints
                 )
                 reading_masks_s = time.perf_counter() - mask_start
-                if self._has_valid_masks(sam_masks):
-                    sam_feat_mean = mask_feature_mean(ins_feat, sam_masks)
+                if MaskCache.is_valid(sam_masks):
+                    sam_feat_mean = mask_feature_mean(ins_feat[6:], sam_masks)
                     s_loss = separation_loss(sam_feat_mean)
+                    c_loss = cohesion_loss(
+                        sam_masks, ins_feat[6:], sam_feat_mean)
                     if sem_masks is not None:
-                        sem_feat_mean = mask_feature_mean(ins_feat, sem_masks)
-                        c_loss = cohesion_loss(
-                            sem_masks, ins_feat, sem_feat_mean)
-                        loss = loss + s_loss + c_loss * self.opt_params.lambda_cohesion
-                    else:
-                        loss = loss + s_loss
+                        sem_feat_mean = mask_feature_mean(
+                            ins_feat[:6], sem_masks)
+                        s_loss = s_loss + separation_loss(sem_feat_mean)
+                        c_loss = c_loss + cohesion_loss(
+                            sem_masks, ins_feat[:6], sem_feat_mean
+                        )
+                    loss = loss + s_loss + c_loss * self.opt_params.lambda_cohesion
                 else:
                     s_loss = ins_feat.new_zeros(())
                     c_loss = None
@@ -768,7 +678,7 @@ class GSBackEnd(mp.Process):
         # After the loop the dict is deleted so GPU memory is reclaimed immediately.
         preload_start = time.perf_counter()
         window_gpu_masks: dict = {
-            int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
+            int(vp.tstamp): self.mask_cache.load(vp.tstamp, self.viewpoints)
             for vp in window_viewpoints
         }
         preload_time = time.perf_counter() - preload_start
@@ -815,8 +725,9 @@ class GSBackEnd(mp.Process):
                 render_start = time.perf_counter()
                 pkg = self._render(viewpoint)
                 rendering_scene_s += time.perf_counter() - render_start
-                image, viewspace_pts, vis_filter, radii, depth, alpha, ins_feat = (
-                    self._unpack_render_pkg(pkg)
+                image, depth, viewspace_pts, vis_filter, radii, alpha, ins_feat = (
+                    pkg.image, pkg.depth, pkg.viewspace_points,
+                    pkg.visibility_filter, pkg.radii, pkg.alpha, pkg.ins_feat
                 )
 
                 # Geometry losses
@@ -846,8 +757,8 @@ class GSBackEnd(mp.Process):
                         sam_masks, sem_masks, sem_mask_ids = window_gpu_masks[_key]
                     else:
                         mask_start = time.perf_counter()
-                        sam_masks, sem_masks, sem_mask_ids = self._load_semantic_masks(
-                            viewpoint.tstamp
+                        sam_masks, sem_masks, sem_mask_ids = self.mask_cache.load(
+                            viewpoint.tstamp, self.viewpoints
                         )
                         reading_masks_s += time.perf_counter() - mask_start
                     feat_losses = self._compute_mask_feature_losses(
@@ -916,6 +827,10 @@ class GSBackEnd(mp.Process):
 
             backprop_start = time.perf_counter()
             loss_mapping.backward()
+            if os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1":
+                # If a custom CUDA kernel (e.g. rasterizer backward) failed, this
+                # will raise here with the correct stack frame.
+                torch.cuda.synchronize()
             backpropagation_s = time.perf_counter() - backprop_start
 
             # Step predictor if prediction loss was computed
@@ -952,6 +867,7 @@ class GSBackEnd(mp.Process):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 optimizer_step_s += time.perf_counter() - gaussian_step_start
+
             adaptive_control_s = time.perf_counter() - adaptive_start
 
             total_iteration_s = time.perf_counter() - iter_start
@@ -1028,7 +944,7 @@ class GSBackEnd(mp.Process):
         # no HDD I/O.  The dict is deleted immediately after the loop.
         preload_start = time.perf_counter()
         all_gpu_masks: dict = {
-            int(vp.tstamp): self._load_semantic_masks(vp.tstamp)
+            int(vp.tstamp): self.mask_cache.load(vp.tstamp, self.viewpoints)
             for vp in self.viewpoints.values()
         }
         preload_time = time.perf_counter() - preload_start
@@ -1057,11 +973,13 @@ class GSBackEnd(mp.Process):
             render_start = time.perf_counter()
             pkg = self._render(viewpoint_cam)
             rendering_scene_s = time.perf_counter() - render_start
-            image, _, _, _, depth, _, ins_feat = self._unpack_render_pkg(pkg)
+            image, depth, ins_feat = pkg.image, pkg.depth, pkg.ins_feat
 
             # Exposure compensation
-            image = torch.exp(viewpoint_cam.exposure_a) * \
-                image + viewpoint_cam.exposure_b
+            image = (
+                torch.exp(viewpoint_cam.exposure_a) * image
+                + viewpoint_cam.exposure_b
+            )
 
             # Masks are already on GPU
             sam_masks, sem_masks, sem_mask_ids = all_gpu_masks[int(
@@ -1224,8 +1142,8 @@ class GSBackEnd(mp.Process):
                 random.choice(list(self.viewpoints.keys()))
             ]
             mask_start = time.perf_counter()
-            _, sem_masks, sem_mask_ids = self._load_semantic_masks(
-                viewpoint_cam.tstamp)
+            _, sem_masks, sem_mask_ids = self.mask_cache.load(
+                viewpoint_cam.tstamp, self.viewpoints)
             reading_masks_s = time.perf_counter() - mask_start
 
             if sem_mask_ids is None or sem_masks is None:
@@ -1248,11 +1166,11 @@ class GSBackEnd(mp.Process):
                 continue
 
             render_start = time.perf_counter()
-            ins_feat = self._render(viewpoint_cam)["rendered_features"]
+            ins_feat = self._render(viewpoint_cam).ins_feat
             rendering_scene_s = time.perf_counter() - render_start
 
             loss_start = time.perf_counter()
-            sem_feat_mean = mask_feature_mean(ins_feat, sem_masks)
+            sem_feat_mean = mask_feature_mean(ins_feat[:6], sem_masks)
             valid_feat, valid_ids = self._filter_prediction_targets(
                 sem_feat_mean, sem_mask_ids
             )
@@ -1332,10 +1250,26 @@ class GSBackEnd(mp.Process):
 
         Log("Finalize segmentation: running HDBSCAN clustering...")
         with torch.no_grad():
+            clustering_cfg = (
+                self.config.get("masks", {}).get("clustering", {})
+                if isinstance(self.config, dict)
+                else {}
+            )
+            min_cluster_size = int(clustering_cfg.get("min_cluster_size", 30))
             cluster_labels = cluster_hdbscan(
                 self.gaussians.get_ins_feat.cpu(),
                 self.gaussians.get_xyz.cpu(),
-                30,
+                min_cluster_size,
+                posenc_num_freqs=int(
+                    clustering_cfg.get("posenc_num_freqs", 0)),
+                posenc_include_input=bool(
+                    clustering_cfg.get("posenc_include_input", True)),
+                posenc_log_sampling=bool(
+                    clustering_cfg.get("posenc_log_sampling", True)),
+                posenc_normalize_positions=bool(
+                    clustering_cfg.get("posenc_normalize_positions", True)),
+                pos_weight=float(clustering_cfg.get("pos_weight", 1.0)),
+                ins_weight=float(clustering_cfg.get("ins_weight", 1.0)),
             )
             self.gaussians.cluster_index = cluster_labels.to(
                 self.gaussians.get_ins_feat.device
@@ -1354,13 +1288,13 @@ class GSBackEnd(mp.Process):
             for label in unique_labels:
                 mask = cluster_labels == label
                 cluster_feats = self.gaussians.get_ins_feat[mask]
-                cluster_mean_feats.append(cluster_feats.mean(dim=0))
+                cluster_mean_feats.append(cluster_feats.mean(dim=0)[:6])
                 mean_features[label] = {
                     "mean_feature": cluster_feats.mean(dim=0)}
 
             if cluster_mean_feats:
                 stacked = torch.stack(cluster_mean_feats,
-                                      dim=0).cuda()   # [K, 6]
+                                      dim=0).cuda()   # [K, C]
                 all_probs = torch.softmax(
                     self.predictor(stacked), dim=-1)  # [K, C]
                 all_labels = all_probs.argmax(
@@ -1389,12 +1323,14 @@ class GSBackEnd(mp.Process):
         )
         for vp_idx, vp_key in enumerate(sample_keys):
             viewpoint_cam = self.viewpoints[vp_key]
-            render_feats = self._render(viewpoint_cam)["rendered_features"]
+            render_feats = self._render(viewpoint_cam).ins_feat
             W, H = render_feats.shape[1], render_feats.shape[2]
-            flat_feats = render_feats.permute(1, 2, 0).reshape(-1, 6)
+            flat_feats = render_feats.permute(
+                1, 2, 0).reshape(-1, render_feats.shape[0])
 
             with torch.no_grad():
-                seg_class = torch.argmax(self.predictor(flat_feats), dim=1)
+                seg_class = torch.argmax(
+                    self.predictor(flat_feats[:, :6]), dim=1)
 
             seg_img = color_map[seg_class].view(W, H, 3).permute(2, 0, 1)
             self.log_rgb_images("Final_seg", seg_img, vp_idx)

@@ -59,10 +59,7 @@ def _save_rendering_outputs(idx, image, ins_feat, depth, instance_ids, save_dirs
     pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
 
     ins_feat_cpu = ins_feat.detach().cpu().numpy()
-    pred_feat_1 = cv2.cvtColor((ins_feat_cpu[0:3].transpose(
-        1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
-    pred_feat_2 = cv2.cvtColor((ins_feat_cpu[3:6].transpose(
-        1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
+    assert ins_feat_cpu.shape[0] % 3 == 0, "Instance feature channels must be divisible by 3."
     unique_ids = torch.unique(instance_ids)
     K = len(unique_ids)
     colors = distinct_colors(K)
@@ -74,8 +71,11 @@ def _save_rendering_outputs(idx, image, ins_feat, depth, instance_ids, save_dirs
     cv2.imwrite(f'{save_dirs["image"]}/{idx:06d}.jpg', pred)
     cv2.imwrite(f'{save_dirs["depth"]}/{idx:06d}.png',
                 np.clip(depth * 6553.5, 0, 65535).astype(np.uint16))
-    cv2.imwrite(f'{save_dirs["ins_feat"]}/{idx:06d}_1.png', pred_feat_1)
-    cv2.imwrite(f'{save_dirs["ins_feat"]}/{idx:06d}_2.png', pred_feat_2)
+    for feat_idx, start in enumerate(range(0, ins_feat_cpu.shape[0], 3), start=1):
+        pred_feat = cv2.cvtColor((ins_feat_cpu[start:start + 3].transpose(
+            1, 2, 0) * 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
+        cv2.imwrite(
+            f'{save_dirs["ins_feat"]}/{idx:06d}_{feat_idx}.png', pred_feat)
     cv2.imwrite(f'{save_dirs["cluster"]}/{idx:06d}.png', instance_ids_img)
 
 
@@ -145,13 +145,17 @@ def eval_rendering(
         )
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background, empty_ins_feats)
-        rendered_image = torch.clamp(rendering["render"], 0.0, 1.0)
-        ins_feat = torch.clamp(rendering["rendered_features"], 0.0, 1.0)
-        depth = rendering["depth"].detach().squeeze().cpu().numpy()
+        pkg = render(frame, gaussians, background, empty_ins_feats)
+        pkg_image, pkg_depth, pkg_viewspace_pts, pkg_vis_filter, pkg_radii, pkg_ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
+            )
+        rendered_image = torch.clamp(pkg_image, 0.0, 1.0)
+        ins_feat = torch.clamp(pkg_ins_feat, 0.0, 1.0)
+        depth = pkg_depth.detach().squeeze().cpu().numpy()
 
         instance_ids = _compute_instance_ids(
-            rendering["rendered_features"], gaussians.cluster_features)
+            pkg_ins_feat, gaussians.cluster_features)
 
         if gtdepthdir is not None and idx in gtdepth_cache:
             gtdepth = cv2.resize(
@@ -209,10 +213,14 @@ def eval_rendering_kf(
     for frame in viewpoints.values():
         gtimage = frame.original_image.cuda()
 
-        rendering = render(frame, gaussians, background, empty_ins_feats)
+        pkg = render(frame, gaussians, background, empty_ins_feats)
+        pkg_image, pkg_depth, pkg_viewspace_pts, pkg_vis_filter, pkg_radii, pkg_ins_feat = (
+                pkg.image, pkg.depth, pkg.viewspace_points,
+                pkg.visibility_filter, pkg.radii, pkg.ins_feat
+            )
         image = torch.clamp(
             torch.exp(frame.exposure_a) *
-            rendering["render"] + frame.exposure_b,
+            pkg_image + frame.exposure_b,
             0.0, 1.0
         )
 
