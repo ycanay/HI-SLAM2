@@ -424,7 +424,6 @@ def evaluate_panoptic_quality(
     void_id=0,
     mapping_mode="lifting",
     verbose=True,
-    per_class=False
 ):
     """
     Evaluate panoptic quality for a given scene and run using torchmetrics.
@@ -437,11 +436,11 @@ def evaluate_panoptic_quality(
         frame_indices: List of frame indices to evaluate. If None, evaluates all available.
         void_id: ID representing void/unknown classes to ignore (default 0)
         mapping_mode: 'lifting' or 'none'
-        per_class: If True, compute and return per-class PQ and mIoU breakdown
         verbose: Whether to print progress
 
     Returns:
-        dict with overall 'pq', 'sq', 'rq', 'miou', and optionally 'per_class'
+        dict with overall 'pq', 'sq', 'rq', 'miou' (derived from per-class means)
+        and 'per_class' breakdown.
     """
     if mapping_mode not in {"lifting", "none"}:
         raise ValueError(
@@ -515,26 +514,22 @@ def evaluate_panoptic_quality(
             print(f"Things: {things}")
             print(f"Stuffs: {stuffs}")
 
-    # Initialize PanopticQuality metrics. When per_class is requested, two
-    # instances are created: one for the authoritative overall scalar (using
-    # torchmetrics' internal denominator>0 filtering) and one for the per-class
-    # breakdown. Both are updated on every frame so their accumulators are
-    # identical; only the compute() output format differs.
+    # Initialize PanopticQuality metric with per-class output. Overall PQ/SQ/RQ
+    # are derived as the unweighted mean over active classes (Mean all).
     _pq_common = dict(
         things=things,
         stuffs=stuffs,
         allow_unknown_preds_category=True,
         return_sq_and_rq=True,
     )
-    pq_metric_overall = PanopticQuality(**_pq_common, return_per_class=False)
-    pq_metric_per_class = PanopticQuality(**_pq_common, return_per_class=True) if per_class else None
+    pq_metric_per_class = PanopticQuality(**_pq_common, return_per_class=True)
 
     # Initialize MeanIoU metric
     # Number of classes is max class ID + 1 (including void class 0)
     num_classes = max(things | stuffs) + 1
     miou_metric = MeanIoU(
         num_classes=num_classes,
-        per_class=per_class,
+        per_class=True,
         include_background=False,  # Exclude void class (0) from mIoU
         input_format="index",      # Inputs are integer class-index tensors, not one-hot
     )
@@ -613,9 +608,7 @@ def evaluate_panoptic_quality(
         )
 
         # Update PQ metrics
-        pq_metric_overall.update(pred_tensor, gt_tensor)
-        if pq_metric_per_class is not None:
-            pq_metric_per_class.update(pred_tensor, gt_tensor)
+        pq_metric_per_class.update(pred_tensor, gt_tensor)
 
         # Update mIoU metric (expects [N, H, W] tensors)
         gt_semantic_tensor = torch.from_numpy(
@@ -631,22 +624,18 @@ def evaluate_panoptic_quality(
         return None
 
     # Compute final results
-    pq_overall = pq_metric_overall.compute()
-    pq_per_class = None
-    valid_categories = None
-    if pq_metric_per_class is not None:
-        pq_per_class = pq_metric_per_class.compute()
-        # Identify categories that appeared in GT or predictions (same filter
-        # torchmetrics applies internally when computing the overall scalar).
-        tp = pq_metric_per_class.true_positives
-        fp = pq_metric_per_class.false_positives
-        fn = pq_metric_per_class.false_negatives
-        valid_categories = (tp + fp + fn) > 0
+    pq_per_class = pq_metric_per_class.compute()
+    # Identify categories that appeared in GT or predictions (same filter
+    # torchmetrics applies internally when computing the overall scalar).
+    tp = pq_metric_per_class.true_positives
+    fp = pq_metric_per_class.false_positives
+    fn = pq_metric_per_class.false_negatives
+    valid_categories = (tp + fp + fn) > 0
     miou_results = miou_metric.compute()
 
     # Format results
     formatted = format_torchmetrics_results(
-        pq_overall, pq_per_class, valid_categories, miou_results, per_class, things, stuffs, id_to_name
+        pq_per_class, valid_categories, miou_results, things, stuffs, id_to_name
     )
 
     if verbose:
@@ -655,58 +644,40 @@ def evaluate_panoptic_quality(
     return formatted
 
 
-def format_torchmetrics_results(pq_overall, pq_per_class, valid_categories, miou_results, per_class, things, stuffs, id_to_name):
+def format_torchmetrics_results(pq_per_class, valid_categories, miou_results, things, stuffs, id_to_name):
     """
     Format torchmetrics PanopticQuality and MeanIoU results into a readable dict.
 
-    pq_overall: shape [3] with [PQ, SQ, RQ] — always the overall scalar from
-                return_per_class=False metric, used for all overall scores.
     pq_per_class: shape [N_categories, 3] with columns [PQ, SQ, RQ] ordered
-                  sorted(things) + sorted(stuffs), or None when per_class=False.
+                  sorted(things) + sorted(stuffs).
     valid_categories: boolean tensor of shape [N_categories] indicating which
-                      categories appeared in GT or predictions (TP+FP+FN > 0),
-                      or None when per_class=False.
-    miou_results: scalar tensor when per_class=False;
-                  shape [num_classes] indexed by class ID when per_class=True.
+                      categories appeared in GT or predictions (TP+FP+FN > 0).
+    miou_results: shape [num_classes] indexed by class ID (include_background=False
+                  removes class 0; miou_results[i] corresponds to class (i + 1)).
 
-    The overall PQ/SQ/RQ scalars come directly from torchmetrics' internal
-    aggregation (denominator>0 filtering), so they are identical whether or
-    not --per-class is requested.
+    The overall 'pq', 'sq', 'rq' keys are the unweighted mean over all active
+    classes (Mean all), matching the 'mean_pq', 'mean_sq', 'mean_rq' values.
 
-    When per_class=True, additional aggregate keys are included:
+    Additional aggregate keys:
       - 'mean_pq', 'mean_sq', 'mean_rq': unweighted mean over all active classes
         (active = appeared in GT or predictions, i.e. TP+FP+FN > 0).
       - 'pq_things', 'sq_things', 'rq_things': mean over active thing classes only.
       - 'pq_stuff', 'sq_stuff', 'rq_stuff': mean over active stuff classes only.
 
     Args:
-        pq_overall: Overall [PQ, SQ, RQ] tensor from return_per_class=False metric
-        pq_per_class: Per-class [N, 3] tensor from return_per_class=True metric, or None
-        valid_categories: Boolean tensor [N_categories] — active category mask, or None
+        pq_per_class: Per-class [N, 3] tensor from return_per_class=True metric
+        valid_categories: Boolean tensor [N_categories] — active category mask
         miou_results: Raw tensor from miou_metric.compute()
-        per_class: Whether per-class breakdown was requested
         things: Set of thing class IDs
         stuffs: Set of stuff class IDs
         id_to_name: Mapping from class ID to human-readable name
 
     Returns:
-        dict with keys 'pq', 'sq', 'rq', 'miou' for overall scores, and when
-        per_class=True also 'per_class', 'mean_pq', 'mean_sq', 'mean_rq',
+        dict with keys 'pq', 'sq', 'rq', 'miou' (all derived from per-class means),
+        'per_class', 'mean_pq', 'mean_sq', 'mean_rq',
         'pq_things', 'sq_things', 'rq_things', 'pq_stuff', 'sq_stuff', 'rq_stuff'.
     """
-    overall = {
-        'pq': pq_overall[0].item() * 100,
-        'sq': pq_overall[1].item() * 100,
-        'rq': pq_overall[2].item() * 100,
-        'miou': miou_results.item() * 100 if not per_class else 0.0,
-    }
-
-    if not per_class:
-        return overall
-
     # pq_per_class: [N_categories, 3], rows ordered sorted(things) + sorted(stuffs).
-    # miou_results: [num_classes - 1] because include_background=False removes
-    #               class 0; miou_results[i] corresponds to class (i + 1).
     pq_categories = sorted(things) + sorted(stuffs)
     n_things = len(sorted(things))
 
@@ -747,9 +718,9 @@ def format_torchmetrics_results(pq_overall, pq_per_class, valid_categories, miou
     pq_stuff, sq_stuff, rq_stuff = _mean_over_mask(stuffs_mask)
 
     return {
-        'pq': overall['pq'],
-        'sq': overall['sq'],
-        'rq': overall['rq'],
+        'pq': mean_pq,
+        'sq': mean_sq,
+        'rq': mean_rq,
         'miou': sum(valid_miou) / len(valid_miou) if valid_miou else 0.0,
         'mean_pq': mean_pq,
         'mean_sq': mean_sq,
@@ -807,8 +778,16 @@ def save_pq_results(results, output_path, scene_name, run_number, per_class=Fals
         per_class: Whether these results include per-class breakdown (affects filename)
         mapping: Mapping mode used (affects filename)
     """
+    if output_path is None:
+        output_path = OUTPUT_PATH
+
     output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
+
+    if run_number != -1:
+        output_path = output_path / f"{scene_name}_{run_number}"
+    else:
+        output_path = output_path / f"{scene_name}"
+
     results_file = output_path / \
         f"pq_results_{scene_name}_{run_number}{'_per_class' if per_class else ''}{'lifting' if mapping == 'lifting' else ''}.json"
 
@@ -872,11 +851,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Save results JSON under outputs/per_class_results_new",
     )
-    parser.add_argument(
-        "--per-class",
-        action="store_true",
-        help="Compute and display per-class PQ (PQ/SQ/RQ) and mIoU breakdown",
-    )
     args = parser.parse_args()
 
     results = evaluate_panoptic_quality(
@@ -887,15 +861,14 @@ if __name__ == "__main__":
         void_id=args.void_id,
         mapping_mode=args.mapping,
         verbose=not args.quiet,
-        per_class=args.per_class
     )
 
     if results and args.save_json:
         save_pq_results(
             results,
-            Path(args.output_base_path) / "per_class_results_new",
+            args.output_base_path,
             args.scene,
             args.run,
-            per_class=args.per_class,
+            per_class=True,
             mapping=args.mapping
         )

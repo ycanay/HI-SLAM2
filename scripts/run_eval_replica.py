@@ -11,8 +11,6 @@ from tqdm import tqdm
 out = 'outputs/replica'
 os.makedirs(f'{out}/meshes', exist_ok=True)
 seqs = sorted(glob('data/Replica_semantics/ro*')) + sorted(glob('data/Replica_semantics/off*'))
-# remove office3 and office4
-seqs = [seq for seq in seqs if '3' not in seq and '4' not in seq]
 print(f'Evaluating on {len(seqs)} sequences: {[os.path.basename(seq) for seq in seqs]}')
 metrics = defaultdict(float)
 for seq in tqdm(seqs, desc='Evaluating sequences', total=len(seqs)):
@@ -42,9 +40,9 @@ for seq in tqdm(seqs, desc='Evaluating sequences', total=len(seqs)):
     metrics['LPIPS'] += psnr['mean_lpips']
     
     # eval panoptic segmentation
-    cmd = f'python scripts/pq_new.py --scene {name} --run -1 --mapping none --per-class --save-json --output-base-path {out} > {out}/{name}/pq_none.txt'
+    cmd = f'python scripts/pq_new.py --scene {name} --run -1 --mapping none --save-json --output-base-path {out} > {out}/{name}/pq_none.txt'
     os.system(cmd)
-    cmd = f'python scripts/pq_new.py --scene {name} --run -1 --mapping lifting --per-class --save-json --output-base-path {out} > {out}/{name}/pq_lifting.txt'
+    cmd = f'python scripts/pq_new.py --scene {name} --run -1 --mapping lifting --save-json --output-base-path {out} > {out}/{name}/pq_lifting.txt'
     os.system(cmd)
 
     def parse_pq_file(path):
