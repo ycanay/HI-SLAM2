@@ -59,16 +59,34 @@ def read_sam3_masks(image_idx: int, mask_path: str) -> dict[int, list[torch.Tens
     return masks
 
 
-def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: int, mask_path: str) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """
-    Convert SAM masks to a semantic segmentation image.
+def sam_masks_semantic_image(
+    masks: dict[int, list[torch.Tensor]],
+    image_idx: int,
+    mask_path: str,
+    hierarchy: dict[int, int] | None = None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Convert SAM masks to a semantic segmentation image.
+
+    When *hierarchy* is provided, label conflicts at overlapping pixels are
+    resolved pairwise: a new label overwrites an existing one only when the
+    new label is the *direct* child of the existing label in the hierarchy
+    (i.e. ``hierarchy[new_label] == existing_label``).  Multi-hop chains are
+    intentionally ignored — only immediate parent-child pairs are considered.
+    Unrelated conflicts keep the first-assigned label.  Without a hierarchy
+    the last mask in metadata order wins (original behaviour).
+
     Args:
-        masks (dict: int -> list[torch.Tensor]): the masks in shape of [num_masks, H, W] for each label.
-        image_idx (int): the index of the image.
-        mask_path (str): path to the all masks directory.
+        masks: Instance masks keyed by label id, each value a list of per-instance tensors.
+        image_idx: Frame index used to locate the masks.json metadata file.
+        mask_path: Root directory containing per-frame mask subdirectories.
+        hierarchy: Optional mapping ``{child_id: parent_id}`` loaded from
+            ``hierarchy.json``.  Keys and values are integer label ids.
+
     Returns:
-        semantic_masks (torch.Tensor): the semantic segmentation image in shape of [num_semantic_masks, H, W].
-        mask_ids (torch.Tensor): the list of mask ids corresponding to the semantic segmentation image shape of [num_semantic_masks].
+        semantic_masks: Binary masks stacked as ``[num_semantic_masks, H, W]``,
+            or *None* when no valid masks exist.
+        mask_ids: 1-D tensor of label ids corresponding to each slice in
+            *semantic_masks*, or *None*.
     """
     if masks is None or len(masks) == 0:
         return None, None
@@ -79,6 +97,7 @@ def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: in
     json_file = mask_directory / "masks.json"
     with open(json_file, 'r') as f:
         metadata = json.load(f)
+
     for item in metadata:
         if 'item_id' in item:
             label = item['item_id']
@@ -91,7 +110,16 @@ def sam_masks_semantic_image(masks: dict[int, list[torch.Tensor]], image_idx: in
         if instance < 0 or instance >= len(masks[label]):
             continue
         mask = masks[label][instance]
-        semantic_image[mask > 0] = int(label)
+        active = mask > 0
+        if hierarchy is not None:
+            assign = active & (semantic_image == -1)
+            direct_parent = hierarchy.get(label)
+            if direct_parent is not None:
+                assign = assign | (active & (semantic_image == direct_parent))
+            semantic_image[assign] = int(label)
+        else:
+            semantic_image[active] = int(label)
+
     semantic_ids = torch.unique(semantic_image)
     semantic_ids = semantic_ids[semantic_ids >= 0].to(torch.int64)
     if semantic_ids.numel() == 0:

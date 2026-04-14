@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from pathlib import Path
+import json
 
 from hislam2.gaussian.semantics.mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import (
@@ -52,6 +53,37 @@ class MaskCache:
             raise ValueError(
                 f"Mask directory is not configured for masks.source='{source}'."
             )
+
+        self._hierarchy = self._load_hierarchy(masks_cfg)
+
+    @staticmethod
+    def _load_hierarchy(masks_cfg: dict) -> dict[int, int] | None:
+        """Load the label hierarchy from disk if configured and enabled.
+
+        The JSON file maps child label ids (as string keys) to their parent
+        label id (integer values).  Both are converted to ``int`` so callers
+        can look up integer label ids directly.
+
+        Args:
+            masks_cfg: The ``masks`` sub-section of the pipeline config.
+
+        Returns:
+            Dict mapping ``child_id -> parent_id``, or *None* when
+            ``use_hierarchy`` is false or ``hierarchy_path`` is not set.
+        """
+        if not masks_cfg.get("use_hierarchy", False):
+            return None
+        hierarchy_path = masks_cfg.get("hierarchy_path")
+        if not hierarchy_path:
+            return None
+        path = Path(hierarchy_path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Mask hierarchy file not found: {path}"
+            )
+        with open(path, "r") as f:
+            raw = json.load(f)
+        return {int(k): int(v) for k, v in raw.items()}
 
     @staticmethod
     def is_valid(mask_tensor):
@@ -124,7 +156,9 @@ class MaskCache:
             return self._generate_mask2former(key, viewpoints)
 
         sam_masks_dict = read_sam3_masks(key, self._masks_dir)
-        sem_cpu, ids_cpu = sam_masks_semantic_image(sam_masks_dict, key, self._masks_dir)
+        sem_cpu, ids_cpu = sam_masks_semantic_image(
+            sam_masks_dict, key, self._masks_dir, hierarchy=self._hierarchy
+        )
         sam_cpu = sam3_dict_to_tensor(sam_masks_dict)
         return sam_cpu, sem_cpu, ids_cpu
 
