@@ -63,7 +63,7 @@ masks:
   source: "sam3" # options: sam3 | mask2former (mas2former alias supported)
   network: "facebook/mask2former-swin-large-coco-panoptic"
   mask2former_network: "facebook/mask2former-swin-large-coco-panoptic"
-  sam3_masks_dir: "/storage/user/ayu/repos/sam3/sam3/data/{scene}/masks/"
+  sam3_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/data/masks/{scene}/masks/"
   mask2former_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/outputs/masks/mask2former/"
   no_classes: 101
   clustering:
