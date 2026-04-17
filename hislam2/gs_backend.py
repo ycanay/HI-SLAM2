@@ -38,6 +38,7 @@ from hislam2.gaussian.utils.camera_utils import Camera
 from hislam2.gaussian.utils.eval_utils import eval_rendering, eval_rendering_kf
 from hislam2.gaussian.gui import gui_utils, slam_gui
 from hislam2.gaussian.semantics.mask_cache import MaskCache
+from hislam2.gaussian.semantics.mask_associator import associate_masks
 from hislam2.gaussian.semantics.predictor import Predictor
 from hislam2.gaussian.utils.post_processing import cluster_hdbscan
 
@@ -118,6 +119,10 @@ class GSBackEnd(mp.Process):
         self.runtime_summary = {}
         self._init_runtime_analysis()
 
+        # Mask association log
+        self.mask_assoc_log_path = os.path.join(self.save_dir, "mask_associations.csv")
+        self._init_mask_assoc_log()
+
         # TensorBoard writer
         if SummaryWriter:
             self.writer = SummaryWriter(
@@ -164,6 +169,9 @@ class GSBackEnd(mp.Process):
         self.size_threshold = cfg["size_threshold"]
         self.window_size = cfg["window_size"]
         self.lambda_dnormal = cfg["lambda_dnormal"]
+        self.lambda_mv_consistency = getattr(self.opt_params, "lambda_mv_consistency", 0.05)
+        self.mv_iou_threshold = getattr(self.opt_params, "mv_iou_threshold", 0.33)
+        self.mv_occlusion_rel_tol = getattr(self.opt_params, "mv_occlusion_rel_tol", 0.1)
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -174,6 +182,12 @@ class GSBackEnd(mp.Process):
         with open(self.runtime_analysis_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.runtime_analysis_fields)
             writer.writeheader()
+
+    def _init_mask_assoc_log(self):
+        """Create or reset the mask association log in ``save_dir``."""
+        with open(self.mask_assoc_log_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["iteration", "tstamp_src", "tstamp_tgt", "mask_src", "mask_tgt", "iou"])
 
     def _append_runtime_analysis(
         self,
@@ -661,6 +675,104 @@ class GSBackEnd(mp.Process):
         Log("Initialized map")
         return pkg
 
+    def _compute_multiview_consistency(
+        self,
+        window_viewpoints,
+        window_renders: dict,
+        window_gpu_masks: dict,
+        *,
+        log_prefix: str = "Loss",
+        log_step: int | None = None,
+    ) -> "torch.Tensor":
+        """Compute multi-view consistency loss over adjacent window viewpoints.
+
+        For each consecutive pair of window viewpoints, source masks are
+        warped into the target view using the stored depth priors.  For every
+        associated mask pair (IoU >= mv_iou_threshold) the L1 distance between
+        mean instance-feature vectors is accumulated.  Returns the mean loss
+        over all pairs, or a zero tensor when no valid associations are found.
+
+        Args:
+            window_viewpoints: Ordered list of Camera objects in the current window.
+            window_renders: Mapping from int(tstamp) to rendered ins_feat ``[D, H, W]``.
+            window_gpu_masks: Mapping from int(tstamp) to ``(sam_masks, sem_masks, sem_ids)``.
+            log_step: TensorBoard global step to use for logging. Defaults to ``self.iteration_count``.
+
+        Returns:
+            Scalar loss tensor on CUDA with gradients attached.
+        """
+        total_loss = torch.zeros((), device="cuda")
+        n_pairs = 0
+
+        for i in range(len(window_viewpoints) - 1):
+            view_a = window_viewpoints[i]
+            view_b = window_viewpoints[i + 1]
+
+            key_a = int(view_a.tstamp)
+            key_b = int(view_b.tstamp)
+
+            if key_a not in window_renders or key_b not in window_renders:
+                continue
+
+            masks_a, _, _ = window_gpu_masks.get(key_a, (None, None, None))
+            masks_b, _, _ = window_gpu_masks.get(key_b, (None, None, None))
+
+            if not MaskCache.is_valid(masks_a) or not MaskCache.is_valid(masks_b):
+                continue
+
+            if view_a.depth is None or view_b.depth is None:
+                continue
+
+            pairs, pair_ious = associate_masks(
+                masks_a,
+                view_a.depth,
+                view_a,
+                masks_b,
+                view_b.depth,
+                view_b,
+                iou_threshold=self.mv_iou_threshold,
+                occlusion_rel_tol=self.mv_occlusion_rel_tol,
+            )
+
+            if pairs.shape[0] == 0:
+                continue
+
+            ins_feat_a = window_renders[key_a]  # [D, H, W]
+            ins_feat_b = window_renders[key_b]
+
+            # Use instance part (last 6 dims) consistent with existing losses
+            feat_a = ins_feat_a[6:]  # [6, H, W]
+            feat_b = ins_feat_b[6:]
+
+            feat_mean_a = mask_feature_mean(feat_a, masks_a)  # [N_a, 6]
+            feat_mean_b = mask_feature_mean(feat_b, masks_b)  # [N_b, 6]
+
+            log_rows = []
+            for k, pair in enumerate(pairs):
+                i_src, i_tgt = pair[0].item(), pair[1].item()
+                if i_src >= feat_mean_a.shape[0] or i_tgt >= feat_mean_b.shape[0]:
+                    continue
+                total_loss = total_loss + l1_loss(feat_mean_a[i_src], feat_mean_b[i_tgt])
+                n_pairs += 1
+                log_rows.append([
+                    self.iteration_count, key_a, key_b,
+                    i_src, i_tgt, f"{pair_ious[k].item():.4f}",
+                ])
+
+            if log_rows:
+                with open(self.mask_assoc_log_path, "a", newline="", encoding="utf-8") as f:
+                    csv.writer(f).writerows(log_rows)
+
+        if n_pairs > 0:
+            mv_loss = total_loss / n_pairs
+        else:
+            mv_loss = total_loss
+        step = log_step if log_step is not None else self.iteration_count
+        self._log_scalar(
+            f"{log_prefix}/mv_consistency_loss", mv_loss.item(), step
+        )
+        return mv_loss
+
     def map(self, current_window, iters, prune=False):
         """Run *iters* Gaussian mapping steps over the current sliding window."""
         if not current_window:
@@ -713,6 +825,8 @@ class GSBackEnd(mp.Process):
             rendering_scene_s = 0.0
             reading_masks_s = 0.0
             calculating_loss_s = 0.0
+            # Stores ins_feat per window viewpoint for multi-view consistency loss
+            window_renders: dict = {}
 
             # Window viewpoints + 2 random extra viewpoints for regularisation
             n_random = min(2, len(extra_viewpoints))
@@ -755,6 +869,9 @@ class GSBackEnd(mp.Process):
                     _key = int(viewpoint.tstamp)
                     if _key in window_gpu_masks:
                         sam_masks, sem_masks, sem_mask_ids = window_gpu_masks[_key]
+                        # Keep ins_feat so the multi-view consistency loss can be
+                        # computed after all window views are rendered.
+                        window_renders[_key] = ins_feat
                     else:
                         mask_start = time.perf_counter()
                         sam_masks, sem_masks, sem_mask_ids = self.mask_cache.load(
@@ -804,6 +921,16 @@ class GSBackEnd(mp.Process):
                         "Loss/semantic_loss",
                         semantic_loss.item(), self.iteration_count,
                     )
+
+                    # Multi-view consistency loss — computed here after all window
+                    # viewpoints have been rendered (window_renders is complete once
+                    # we reach the last window viewpoint in the loop).
+                    if viewpoint is window_viewpoints[-1] and len(window_renders) >= 2:
+                        mv_loss = self._compute_multiview_consistency(
+                            window_viewpoints, window_renders, window_gpu_masks
+                        )
+                        loss_mapping = loss_mapping + self.lambda_mv_consistency * mv_loss
+
                 if self.iteration_count % 100 == 0:
                     self.log_instance_feats(
                         "Loss/PCA_RGB_Image", ins_feat, self.iteration_count
@@ -827,6 +954,7 @@ class GSBackEnd(mp.Process):
 
             backprop_start = time.perf_counter()
             loss_mapping.backward()
+            del window_renders
             if os.getenv("HISLAM2_CUDA_DEBUG", "0") == "1":
                 # If a custom CUDA kernel (e.g. rasterizer backward) failed, this
                 # will raise here with the correct stack frame.
@@ -1023,6 +1151,34 @@ class GSBackEnd(mp.Process):
                 semantic_loss = self._accumulate_semantic_loss(feat_losses)
                 loss = loss + semantic_loss
                 p_loss = feat_losses["p_loss"]
+
+                # Multi-view consistency against the pose-graph-adjacent keyframe.
+                # "Adjacent" is the temporally next (or previous at the boundary)
+                # keyframe in the sorted keyframe list — the sequential edges that
+                # the SLAM frontend always establishes.
+                sorted_kf_keys = sorted(self.viewpoints.keys())
+                pos = sorted_kf_keys.index(int(viewpoint_cam.tstamp))
+                adj_pos = pos + 1 if pos + 1 < len(sorted_kf_keys) else pos - 1
+                if adj_pos >= 0 and viewpoint_cam.depth is not None:
+                    view_b = self.viewpoints[sorted_kf_keys[adj_pos]]
+                    masks_b = all_gpu_masks.get(int(view_b.tstamp), (None, None, None))[0]
+                    if view_b.depth is not None and MaskCache.is_valid(masks_b):
+                        pkg_b = self._render(view_b)
+                        ins_feat_b = pkg_b.ins_feat
+                        mv_renders = {
+                            int(viewpoint_cam.tstamp): ins_feat,
+                            int(view_b.tstamp): ins_feat_b,
+                        }
+                        mv_loss = self._compute_multiview_consistency(
+                            [viewpoint_cam, view_b],
+                            mv_renders,
+                            all_gpu_masks,
+                            log_prefix="Refinement_Loss",
+                            log_step=iteration,
+                        )
+                        loss = loss + self.lambda_mv_consistency * mv_loss
+                        del ins_feat_b, pkg_b
+
             calculating_loss_s = time.perf_counter() - loss_start
 
             # Logging

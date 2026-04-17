@@ -59,13 +59,16 @@ opt_params:
   densify_grad_threshold: 0.0002
   lambda_cohesion: 0.01
   ins_feat_optimization_per_step: 5
+  lambda_mv_consistency: 0.05
+  mv_iou_threshold: 0.5
+  mv_occlusion_rel_tol: 0.1
 masks:
   source: "sam3" # options: sam3 | mask2former (mas2former alias supported)
   network: "facebook/mask2former-swin-large-coco-panoptic"
   mask2former_network: "facebook/mask2former-swin-large-coco-panoptic"
   sam3_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/data/masks/{scene}/masks/"
   mask2former_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/outputs/masks/mask2former/"
-  use_hierarchy: false
+  use_hierarchy: true
   hierarchy_path: "data/hierarchy.json"
   no_classes: 101
   clustering:
