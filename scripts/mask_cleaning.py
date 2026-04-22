@@ -271,19 +271,28 @@ def cmd_build_hierarchy(args: argparse.Namespace) -> None:
 
 def resolve_frame(
     masks_with_conf: dict[int, list[tuple[np.ndarray, float]]],
-    parent_set: set[int],
+    hierarchy: dict[int, int],
 ) -> np.ndarray:
     """
     Merge all SAM3 masks for one frame into a single label image.
 
-    Pixel assignment priority:
-        - Priority 2: labels that appear as a parent in the hierarchy
-        - Priority 1: all other labels (children or ungrouped)
-        - Tiebreaker within the same priority level: higher SAM3 confidence
+    The hierarchy is applied strictly pairwise: only registered direct
+    parent-child pairs override each other.  Grandparents do **not**
+    implicitly beat grandchildren.
+
+    Pixel assignment rules, evaluated per incoming mask:
+        - Empty pixels: assign the new label.
+        - Same class: the mask with higher ``confidence`` wins.
+        - Different class with ``hierarchy[existing] == new_label``: the
+          new label is the direct parent → overwrite.
+        - Different class with ``hierarchy[new_label] == existing``: the
+          existing label is the direct parent → keep.
+        - Different class with no direct pair registered: keep first-assigned.
 
     Args:
         masks_with_conf: Output of :func:`load_masks_with_confidence`.
-        parent_set: Set of label IDs that are parents in the hierarchy.
+        hierarchy: Mapping ``{child_label_id: parent_label_id}`` from
+            :func:`build_hierarchy`.  May be empty.
 
     Returns:
         Label image of shape (H, W) with dtype uint16; pixel value is the
@@ -297,20 +306,30 @@ def resolve_frame(
     H, W = first_masks[0][0].shape
 
     label_image = np.zeros((H, W), dtype=np.uint16)
-    priority_image = np.zeros((H, W), dtype=np.int8)
     confidence_image = np.zeros((H, W), dtype=np.float32)
+    assigned = np.zeros((H, W), dtype=bool)
+
+    parent_to_children: dict[int, list[int]] = {}
+    for child_id, parent_id in hierarchy.items():
+        parent_to_children.setdefault(parent_id, []).append(child_id)
 
     for label_id, instances in masks_with_conf.items():
-        priority = 2 if label_id in parent_set else 1
+        children = parent_to_children.get(label_id, [])
         for mask, conf in instances:
             pixels = mask > 0
-            override = pixels & (
-                (priority_image < priority)
-                | ((priority_image == priority) & (confidence_image < conf))
-            )
+
+            empty_assign = pixels & ~assigned
+            same_class_conf = pixels & (label_image == label_id) & (confidence_image < conf)
+
+            parent_overwrite = np.zeros_like(pixels)
+            for child_label in children:
+                parent_overwrite |= label_image == child_label
+            parent_overwrite &= pixels & assigned
+
+            override = empty_assign | same_class_conf | parent_overwrite
             label_image[override] = label_id
-            priority_image[override] = priority
             confidence_image[override] = conf
+            assigned[override] = True
 
     return label_image
 
@@ -330,7 +349,6 @@ def process_scene(
         hierarchy: Child→parent dict from :func:`build_hierarchy`.
         output_dir: Directory where cleaned label PNGs will be saved.
     """
-    parent_set = set(hierarchy.values())
     scene_out = output_dir / scene
     scene_out.mkdir(parents=True, exist_ok=True)
 
@@ -338,7 +356,7 @@ def process_scene(
     for idx in tqdm(frame_indices, desc=f"Cleaning: {scene}", unit="frame"):
         frame_dir = masks_root / scene / "masks" / f"frame{idx:06d}"
         masks = load_masks_with_confidence(frame_dir)
-        label_image = resolve_frame(masks, parent_set)
+        label_image = resolve_frame(masks, hierarchy)
         out_path = scene_out / f"frame{idx:06d}.png"
         Image.fromarray(label_image).save(str(out_path))
 
@@ -379,7 +397,7 @@ def _confidence_only_label_image(
     Returns:
         Label image (H, W) uint16.
     """
-    return resolve_frame(masks_with_conf, parent_set=set())
+    return resolve_frame(masks_with_conf, hierarchy={})
 
 
 def evaluate_against_gt(

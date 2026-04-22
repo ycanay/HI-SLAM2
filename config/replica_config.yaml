@@ -59,6 +59,9 @@ opt_params:
   densify_grad_threshold: 0.0002
   lambda_cohesion: 0.01
   ins_feat_optimization_per_step: 5
+  lambda_mv_consistency: 0.05
+  mv_iou_threshold: 0.5
+  mv_occlusion_rel_tol: 0.1
 masks:
   source: "sam3" # options: sam3 | mask2former (mas2former alias supported)
   network: "facebook/mask2former-swin-large-coco-panoptic"
@@ -69,7 +72,7 @@ masks:
   hierarchy_path: "data/hierarchy.json"
   no_classes: 101
   clustering:
-    min_cluster_size: 100
+    min_cluster_size: 200
     # NeRF-style positional encoding for Gaussian xyz in clustering.
     # Increasing posenc dims makes position contribute more (vs ins_feat).
     posenc_num_freqs: 0
