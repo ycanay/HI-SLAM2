@@ -5,6 +5,7 @@ import json
 from hislam2.gaussian.semantics.mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import (
     read_sam3_masks,
+    resolve_sam_masks_conflicts,
     sam_masks_semantic_image,
     sam3_dict_to_tensor,
 )
@@ -156,6 +157,9 @@ class MaskCache:
             return self._generate_mask2former(key, viewpoints)
 
         sam_masks_dict = read_sam3_masks(key, self._masks_dir)
+        sam_masks_dict = resolve_sam_masks_conflicts(
+            sam_masks_dict, key, self._masks_dir, hierarchy=self._hierarchy
+        )
         sem_cpu, ids_cpu = sam_masks_semantic_image(
             sam_masks_dict, key, self._masks_dir, hierarchy=self._hierarchy
         )

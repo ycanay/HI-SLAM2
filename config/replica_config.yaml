@@ -68,11 +68,11 @@ masks:
   mask2former_network: "facebook/mask2former-swin-large-coco-panoptic"
   sam3_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/data/masks/{scene}/masks/"
   mask2former_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/outputs/masks/mask2former/"
-  use_hierarchy: true
+  use_hierarchy: false
   hierarchy_path: "data/hierarchy.json"
   no_classes: 101
   clustering:
-    min_cluster_size: 100
+    min_cluster_size: 200
     # NeRF-style positional encoding for Gaussian xyz in clustering.
     # Increasing posenc dims makes position contribute more (vs ins_feat).
     posenc_num_freqs: 0
