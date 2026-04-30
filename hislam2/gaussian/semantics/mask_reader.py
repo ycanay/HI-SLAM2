@@ -59,6 +59,80 @@ def read_sam3_masks(image_idx: int, mask_path: str) -> dict[int, list[torch.Tens
     return masks
 
 
+def filter_overlapping_masks(
+    masks: dict[int, list[torch.Tensor]],
+    threshold: float = 0.8,
+) -> dict[int, list[torch.Tensor]]:
+    """Reject masks that are nearly fully contained inside a larger mask.
+
+    For every pair of instance masks (across all classes), compute
+    ``intersection / min(area_a, area_b)``. When the ratio exceeds
+    *threshold*, drop the smaller mask of the pair; the larger mask is
+    always kept. Ties on area drop the later index, making the result
+    deterministic.
+
+    The returned dict preserves the input keys and per-list lengths so
+    that downstream code which uses the metadata's ``instance`` field as
+    a list index keeps working unchanged. Rejected slots are replaced
+    with zero-filled tensors of the same shape; ``resolve_sam_masks_conflicts``
+    skips them naturally (``active.any()`` is False) and
+    ``sam3_dict_to_tensor`` drops them at the stacking step.
+
+    Args:
+        masks: Instance masks keyed by label id, each value a list of
+            per-instance binary tensors of identical ``[H, W]`` shape.
+        threshold: Containment ratio above which the smaller mask is
+            rejected. Must be in ``(0.0, 1.0]``.
+
+    Returns:
+        New masks dict with the same structure as the input, where
+        rejected instance slots are zero tensors.
+    """
+    if masks is None or len(masks) == 0:
+        return masks
+
+    flat: list[tuple[int, int]] = []
+    bool_masks: list[torch.Tensor] = []
+    areas: list[int] = []
+    for label, instances in masks.items():
+        for inst_idx, mask in enumerate(instances):
+            bm = mask > 0
+            flat.append((label, inst_idx))
+            bool_masks.append(bm)
+            areas.append(int(bm.sum().item()))
+
+    n = len(flat)
+    keep = [True] * n
+    for i in range(n):
+        if not keep[i] or areas[i] == 0:
+            continue
+        for j in range(i + 1, n):
+            if not keep[j] or areas[j] == 0:
+                continue
+            intersection = int((bool_masks[i] & bool_masks[j]).sum().item())
+            if intersection == 0:
+                continue
+            min_area = min(areas[i], areas[j])
+            if intersection / min_area > threshold:
+                if areas[i] <= areas[j]:
+                    keep[i] = False
+                    break
+                else:
+                    keep[j] = False
+
+    keep_lookup = {flat[k]: keep[k] for k in range(n)}
+    result: dict[int, list[torch.Tensor]] = {}
+    for label, instances in masks.items():
+        new_list = []
+        for inst_idx, mask in enumerate(instances):
+            if keep_lookup.get((label, inst_idx), True):
+                new_list.append(mask)
+            else:
+                new_list.append(torch.zeros_like(mask))
+        result[label] = new_list
+    return result
+
+
 def _read_metadata(image_idx: int, mask_path: str) -> list[dict]:
     """Read and normalise masks.json into ``[{label, instance, confidence}]``.
 
@@ -318,16 +392,27 @@ def resolve_sam_masks_conflicts(
 
 
 def sam3_dict_to_tensor(masks: dict[int, list[torch.Tensor]]) -> torch.Tensor:
-    """
-    Convert SAM3 masks dictionary to a tensor.
+    """Convert a SAM3 masks dict into a single stacked tensor.
+
+    Empty (all-zero) instance masks are dropped at this step so that
+    downstream losses never receive zero-area masks. Empty masks can
+    arise either from upstream rejection in
+    :func:`filter_overlapping_masks` or from full pixel removal in
+    :func:`resolve_sam_masks_conflicts`.
+
     Args:
-        masks (dict: int -> list[torch.Tensor]): the masks in shape of [num_masks, H, W] for each label.
+        masks: Instance masks keyed by label id, each value a list of
+            ``[H, W]`` binary tensors.
+
     Returns:
-        all_masks (torch.Tensor): the masks in shape of [total_num_masks, H, W].
+        Stacked binary masks of shape ``[total_num_kept_masks, H, W]``,
+        or an empty tensor when no non-empty mask is present.
     """
     all_mask_tensors = []
     for label_masks in masks.values():
-        all_mask_tensors.extend(label_masks)
+        for mask in label_masks:
+            if (mask > 0).any():
+                all_mask_tensors.append(mask)
     if all_mask_tensors:
         return torch.stack(all_mask_tensors, dim=0)
     return torch.empty((0, 0, 0), dtype=torch.uint8)

@@ -4,6 +4,7 @@ import json
 
 from hislam2.gaussian.semantics.mask_generator import MaskGenerator
 from hislam2.gaussian.semantics.mask_reader import (
+    filter_overlapping_masks,
     read_sam3_masks,
     resolve_sam_masks_conflicts,
     sam_masks_semantic_image,
@@ -56,6 +57,7 @@ class MaskCache:
             )
 
         self._hierarchy = self._load_hierarchy(masks_cfg)
+        self._overlap_threshold = float(masks_cfg.get("conflict_overlap_threshold", 0.8))
 
     @staticmethod
     def _load_hierarchy(masks_cfg: dict) -> dict[int, int] | None:
@@ -157,6 +159,9 @@ class MaskCache:
             return self._generate_mask2former(key, viewpoints)
 
         sam_masks_dict = read_sam3_masks(key, self._masks_dir)
+        sam_masks_dict = filter_overlapping_masks(
+            sam_masks_dict, threshold=self._overlap_threshold
+        )
         sam_masks_dict = resolve_sam_masks_conflicts(
             sam_masks_dict, key, self._masks_dir, hierarchy=self._hierarchy
         )

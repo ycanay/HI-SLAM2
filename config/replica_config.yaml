@@ -68,8 +68,9 @@ masks:
   mask2former_network: "facebook/mask2former-swin-large-coco-panoptic"
   sam3_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/data/masks/{scene}/masks/"
   mask2former_masks_dir: "/storage/user/ayu/repos/HI-SLAM2/outputs/masks/mask2former/"
-  use_hierarchy: true
+  use_hierarchy: false
   hierarchy_path: "/storage/user/ayu/repos/HI-SLAM2/outputs/hierarchy_room_0.json"
+  conflict_overlap_threshold: 0.8
   no_classes: 101
   clustering:
     min_cluster_size: 200
